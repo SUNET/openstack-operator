@@ -592,7 +592,7 @@ class OpenStackClient:
     ) -> object | None:
         """Get a federation protocol."""
         try:
-            return self.conn.identity.get_federation_protocol(protocol_id, idp_id)
+            return self.conn.identity.get_federation_protocol(idp_id, protocol_id)
         except ResourceNotFound:
             return None
 
@@ -603,7 +603,7 @@ class OpenStackClient:
         """Create a federation protocol."""
         logger.info("Creating federation protocol: %s for IdP %s", protocol_id, idp_id)
         return self.conn.identity.create_federation_protocol(
-            protocol_id,
             idp_id,
+            id=protocol_id,
             mapping_id=mapping_id,
         )
