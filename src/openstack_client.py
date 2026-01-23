@@ -229,6 +229,16 @@ class OpenStackClient:
         logger.info("Adding user %s to group %s", user_id, group_id)
         self.conn.identity.add_user_to_group(user_id, group_id)
 
+    @retry_on_error()
+    def remove_user_from_group(self, user_id: str, group_id: str) -> None:
+        """Remove a user from a group."""
+        logger.info("Removing user %s from group %s", user_id, group_id)
+        self.conn.identity.remove_user_from_group(user_id, group_id)
+
+    def list_group_users(self, group_id: str) -> list[User]:
+        """List all users in a group."""
+        return list(self.conn.identity.group_users(group_id))
+
     # -------------------------------------------------------------------------
     # Role operations
     # -------------------------------------------------------------------------

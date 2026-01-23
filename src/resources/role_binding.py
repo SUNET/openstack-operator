@@ -66,37 +66,51 @@ def apply_role_bindings(
                     f"Group {group_name} not found in domain {group_domain}"
                 )
 
-        # Add users to the project group directly
+        # Sync users to the project group
         # Users are identified by their OIDC sub claim (used as username)
         # This is required for features like application credentials
         users = binding.get("users", [])
         user_domain = binding.get("userDomain", project_domain)
-        if users and group_id:
-            _add_users_to_group(client, users, user_domain, group_id)
+        if group_id:
+            _sync_users_to_group(client, users, user_domain, group_id)
 
 
-def _add_users_to_group(
+def _sync_users_to_group(
     client: OpenStackClient,
-    users: list[str],
+    desired_users: list[str],
     user_domain: str,
     group_id: str,
 ) -> None:
-    """Add users to a group by their OIDC sub (username).
+    """Sync group membership to match desired users.
 
-    Users must already exist in the domain (created via federation on first login).
-    Users that don't exist yet are skipped - they'll be added on next reconciliation
-    after their first SSO login.
+    Adds users that should be in the group and removes users that shouldn't.
+    Users are identified by their OIDC sub claim (used as username).
+    Users that don't exist yet are skipped - they'll be added on next
+    reconciliation after their first SSO login.
     """
-    for username in users:
-        user = client.get_user(username, user_domain)
-        if user:
-            client.add_user_to_group(user.id, group_id)
-            logger.info(f"Added user {username} to group {group_id}")
-        else:
-            logger.debug(
-                f"User {username} not found in domain {user_domain}, "
-                "will be added after first SSO login"
-            )
+    # Get current group members
+    current_members = client.list_group_users(group_id)
+    current_usernames = {user.name for user in current_members}
+
+    # Add users that should be in the group
+    for username in desired_users:
+        if username not in current_usernames:
+            user = client.get_user(username, user_domain)
+            if user:
+                client.add_user_to_group(user.id, group_id)
+                logger.info(f"Added user {username} to group {group_id}")
+            else:
+                logger.debug(
+                    f"User {username} not found in domain {user_domain}, "
+                    "will be added after first SSO login"
+                )
+
+    # Remove users that shouldn't be in the group
+    desired_set = set(desired_users)
+    for user in current_members:
+        if user.name not in desired_set:
+            client.remove_user_from_group(user.id, group_id)
+            logger.info(f"Removed user {user.name} from group {group_id}")
 
 
 def get_users_from_role_bindings(
