@@ -8,6 +8,9 @@ from utils import make_group_name
 
 logger = logging.getLogger(__name__)
 
+# Tag used to identify operator-managed resources
+MANAGED_BY_TAG = "managed-by-openstack-operator"
+
 
 def ensure_project(
     client: OpenStackClient,
@@ -28,9 +31,12 @@ def ensure_project(
         if project.description != description or project.is_enabled != enabled:
             client.update_project(project.id, description=description, enabled=enabled)
         project_id = project.id
+        # Ensure tag exists on existing projects
+        client.add_project_tag(project_id, MANAGED_BY_TAG)
     else:
         project = client.create_project(name, domain, description, enabled)
         project_id = project.id
+        client.add_project_tag(project_id, MANAGED_BY_TAG)
         logger.info(f"Created project {name} with ID {project_id}")
 
     # Ensure group exists for project users

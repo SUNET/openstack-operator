@@ -20,6 +20,7 @@ from resources.federation import FederationManager
 from resources.network import delete_networks, ensure_networks
 from resources.project import delete_project, ensure_project, get_project_info
 from resources.quota import apply_quotas
+from resources.garbage_collection import collect_garbage, get_expected_projects_from_crs
 from resources.role_binding import apply_role_bindings, get_users_from_role_bindings
 from resources.security_group import delete_security_groups, ensure_security_groups
 from utils import now_iso
@@ -443,6 +444,93 @@ def reconcile_project(
 
     except Exception as e:
         logger.error(f"Reconciliation failed for {namespace}/{name}: {e}")
+
+
+@kopf.daemon("sunet.se", "v1alpha1", "openstackprojects", cancellation_timeout=10)
+async def garbage_collector(
+    name: str,
+    namespace: str,
+    stopped: kopf.DaemonStopped,
+    **_: Any,
+) -> None:
+    """Periodic garbage collection daemon.
+
+    Runs every 10 minutes to clean up orphaned resources in OpenStack
+    that don't have corresponding OpenstackProject CRs.
+
+    This daemon attaches to each CR but only the "leader" (first CR
+    alphabetically) actually runs GC to avoid duplicate work.
+    """
+    gc_interval = int(os.environ.get("GC_INTERVAL_SECONDS", "600"))
+    managed_domain = os.environ.get("MANAGED_DOMAIN", "sso-users")
+    my_identity = f"{namespace}/{name}"
+
+    while not stopped:
+        try:
+            # Load k8s config
+            try:
+                k8s_config.load_incluster_config()
+            except k8s_config.ConfigException:
+                k8s_config.load_kube_config()
+
+            # List all OpenstackProject CRs
+            api = k8s_client.CustomObjectsApi()
+            crs = api.list_cluster_custom_object(
+                group="sunet.se",
+                version="v1alpha1",
+                plural="openstackprojects",
+            )
+
+            cr_items = crs.get("items", [])
+            if not cr_items:
+                logger.debug("No OpenstackProject CRs found, skipping GC")
+                await stopped.wait(gc_interval)
+                continue
+
+            # Simple leader election: only the first CR (alphabetically) runs GC
+            sorted_crs = sorted(
+                cr_items,
+                key=lambda x: (
+                    x.get("metadata", {}).get("namespace", ""),
+                    x.get("metadata", {}).get("name", ""),
+                ),
+            )
+            first_cr = sorted_crs[0]
+            leader_identity = (
+                f"{first_cr.get('metadata', {}).get('namespace', '')}/"
+                f"{first_cr.get('metadata', {}).get('name', '')}"
+            )
+
+            # Only run GC if we're the leader
+            if my_identity != leader_identity:
+                logger.debug(
+                    f"GC skipped on {my_identity}, leader is {leader_identity}"
+                )
+                await stopped.wait(gc_interval)
+                continue
+
+            logger.info(f"Running garbage collection for domain {managed_domain}")
+
+            # Get expected projects from all CRs
+            expected_projects = get_expected_projects_from_crs(cr_items)
+            logger.debug(f"Expected projects: {expected_projects}")
+
+            # Run GC
+            client = get_openstack_client()
+            result = collect_garbage(client, managed_domain, expected_projects)
+
+            if result["deleted_projects"] or result["deleted_groups"]:
+                logger.info(
+                    f"GC completed: deleted {len(result['deleted_projects'])} projects, "
+                    f"{len(result['deleted_groups'])} groups"
+                )
+            else:
+                logger.debug("GC completed: no orphaned resources found")
+
+        except Exception as e:
+            logger.error(f"Garbage collection failed: {e}")
+
+        await stopped.wait(gc_interval)
 
 
 def main() -> None:

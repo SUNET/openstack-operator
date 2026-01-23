@@ -137,6 +137,30 @@ class OpenStackClient:
             return None
         return self.conn.identity.find_project(name, domain_id=domain_obj.id)
 
+    def list_projects_in_domain(self, domain_id: str) -> list[Project]:
+        """List all projects in a domain."""
+        return list(self.conn.identity.projects(domain_id=domain_id))
+
+    def list_projects_with_tag(self, domain_id: str, tag: str) -> list[Project]:
+        """List projects in a domain that have a specific tag."""
+        return list(self.conn.identity.projects(domain_id=domain_id, tags=tag))
+
+    @retry_on_error()
+    def add_project_tag(self, project_id: str, tag: str) -> None:
+        """Add a tag to a project."""
+        # Get current tags and add new one
+        project = self.conn.identity.get_project(project_id)
+        current_tags = set(project.tags or [])
+        if tag not in current_tags:
+            current_tags.add(tag)
+            self.conn.identity.set_project_tags(project_id, list(current_tags))
+            logger.debug("Added tag %s to project %s", tag, project_id)
+
+    def project_has_tag(self, project_id: str, tag: str) -> bool:
+        """Check if a project has a specific tag."""
+        project = self.conn.identity.get_project(project_id)
+        return tag in (project.tags or [])
+
     @retry_on_error()
     def create_project(
         self,
