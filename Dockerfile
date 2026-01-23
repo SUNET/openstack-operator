@@ -14,12 +14,12 @@ RUN useradd -m -u 1000 -g operator operator
 
 WORKDIR /app
 
-# Install Python dependencies
-COPY pyproject.toml ./
-RUN pip install --no-cache-dir .
-
-# Copy application code
+# Copy all application files
+COPY pyproject.toml README.md ./
 COPY src/ ./src/
+
+# Install Python package and dependencies
+RUN pip install --no-cache-dir .
 
 # Switch to non-root user
 USER operator
