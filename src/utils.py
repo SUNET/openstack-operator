@@ -2,6 +2,7 @@
 
 import datetime
 import re
+from typing import Any
 
 
 def sanitize_name(name: str) -> str:
@@ -29,3 +30,33 @@ def make_group_name(project_name: str) -> str:
 def now_iso() -> str:
     """Return current UTC time in ISO format."""
     return datetime.datetime.now(datetime.UTC).isoformat()
+
+
+def set_condition(
+    status: dict[str, Any],
+    condition_type: str,
+    condition_status: str,
+    reason: str = "",
+    message: str = "",
+) -> None:
+    """Set or update a condition in the status conditions list."""
+    conditions: list[dict[str, str]] = status.setdefault("conditions", [])
+
+    for condition in conditions:
+        if condition["type"] == condition_type:
+            if condition["status"] != condition_status:
+                condition["status"] = condition_status
+                condition["lastTransitionTime"] = now_iso()
+            condition["reason"] = reason
+            condition["message"] = message
+            return
+
+    conditions.append(
+        {
+            "type": condition_type,
+            "status": condition_status,
+            "reason": reason,
+            "message": message,
+            "lastTransitionTime": now_iso(),
+        }
+    )
