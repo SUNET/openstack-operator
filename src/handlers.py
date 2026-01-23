@@ -22,9 +22,43 @@ from resources.project import delete_project, ensure_project, get_project_info
 from resources.quota import apply_quotas
 from resources.role_binding import apply_role_bindings, get_users_from_role_bindings
 from resources.security_group import delete_security_groups, ensure_security_groups
-from utils import now_iso, set_condition
+from utils import now_iso
 
 logger = logging.getLogger(__name__)
+
+
+def _set_patch_condition(
+    patch: kopf.Patch,
+    condition_type: str,
+    condition_status: str,
+    reason: str = "",
+    message: str = "",
+) -> None:
+    """Set or update a condition in patch.status.conditions."""
+    if "conditions" not in patch.status:
+        patch.status["conditions"] = []
+
+    conditions: list[dict[str, str]] = patch.status["conditions"]
+
+    for condition in conditions:
+        if condition["type"] == condition_type:
+            if condition["status"] != condition_status:
+                condition["status"] = condition_status
+                condition["lastTransitionTime"] = now_iso()
+            condition["reason"] = reason
+            condition["message"] = message
+            return
+
+    conditions.append(
+        {
+            "type": condition_type,
+            "status": condition_status,
+            "reason": reason,
+            "message": message,
+            "lastTransitionTime": now_iso(),
+        }
+    )
+
 
 # Global OpenStack client (initialized on startup)
 _os_client: OpenStackClient | None = None
@@ -102,16 +136,15 @@ def create_project(
     namespace: str,
     name: str,
     **_: Any,
-) -> dict[str, Any]:
+) -> None:
     """Handle OpenstackProject creation."""
     logger.info(f"Creating OpenstackProject: {namespace}/{name}")
 
-    # Update status to Provisioning
+    # Update status to Provisioning - use patch.status directly
     patch.status["phase"] = "Provisioning"
     patch.status["conditions"] = []
 
     client = get_openstack_client()
-    result_status: dict[str, Any] = {"phase": "Provisioning"}
 
     try:
         # Extract spec values
@@ -121,38 +154,36 @@ def create_project(
         enabled = spec.get("enabled", True)
 
         # 1. Create project and group
-        set_condition(result_status, "ProjectReady", "False", "Creating", "")
+        _set_patch_condition(patch, "ProjectReady", "False", "Creating", "")
         project_id, group_id = ensure_project(
             client, project_name, domain, description, enabled
         )
-        result_status["projectId"] = project_id
-        result_status["groupId"] = group_id
-        set_condition(result_status, "ProjectReady", "True", "Created", "")
+        patch.status["projectId"] = project_id
+        patch.status["groupId"] = group_id
+        _set_patch_condition(patch, "ProjectReady", "True", "Created", "")
 
         # 2. Apply quotas
         quotas = spec.get("quotas", {})
         if quotas:
-            set_condition(result_status, "QuotasReady", "False", "Applying", "")
+            _set_patch_condition(patch, "QuotasReady", "False", "Applying", "")
             apply_quotas(client, project_id, quotas)
-            set_condition(result_status, "QuotasReady", "True", "Applied", "")
+            _set_patch_condition(patch, "QuotasReady", "True", "Applied", "")
 
         # 3. Create networks
         networks = spec.get("networks", [])
         if networks:
-            set_condition(result_status, "NetworksReady", "False", "Creating", "")
+            _set_patch_condition(patch, "NetworksReady", "False", "Creating", "")
             network_statuses = ensure_networks(client, project_id, networks)
-            result_status["networks"] = network_statuses
-            set_condition(result_status, "NetworksReady", "True", "Created", "")
+            patch.status["networks"] = network_statuses
+            _set_patch_condition(patch, "NetworksReady", "True", "Created", "")
 
         # 4. Create security groups
         security_groups = spec.get("securityGroups", [])
         if security_groups:
-            set_condition(
-                result_status, "SecurityGroupsReady", "False", "Creating", ""
-            )
+            _set_patch_condition(patch, "SecurityGroupsReady", "False", "Creating", "")
             sg_statuses = ensure_security_groups(client, project_id, security_groups)
-            result_status["securityGroups"] = sg_statuses
-            set_condition(result_status, "SecurityGroupsReady", "True", "Created", "")
+            patch.status["securityGroups"] = sg_statuses
+            _set_patch_condition(patch, "SecurityGroupsReady", "True", "Created", "")
 
         # 5. Apply role bindings
         role_bindings = spec.get("roleBindings", [])
@@ -164,9 +195,7 @@ def create_project(
         if federation_ref and role_bindings:
             fed_config = get_federation_config(namespace, federation_ref)
             if fed_config and fed_config["idp_name"]:
-                set_condition(
-                    result_status, "FederationReady", "False", "Configuring", ""
-                )
+                _set_patch_condition(patch, "FederationReady", "False", "Configuring", "")
                 users = get_users_from_role_bindings(role_bindings)
                 if users:
                     manager = FederationManager(
@@ -176,23 +205,17 @@ def create_project(
                         fed_config["sso_domain"],
                     )
                     manager.add_project_mapping(project_name, users)
-                set_condition(
-                    result_status, "FederationReady", "True", "Configured", ""
-                )
+                _set_patch_condition(patch, "FederationReady", "True", "Configured", "")
 
-        result_status["phase"] = "Ready"
-        result_status["lastSyncTime"] = now_iso()
+        patch.status["phase"] = "Ready"
+        patch.status["lastSyncTime"] = now_iso()
         logger.info(f"Successfully created OpenstackProject: {namespace}/{name}")
 
     except Exception as e:
         logger.error(f"Failed to create OpenstackProject {namespace}/{name}: {e}")
-        result_status["phase"] = "Error"
-        set_condition(
-            result_status, "Ready", "False", "Error", str(e)[:200]
-        )
+        patch.status["phase"] = "Error"
+        _set_patch_condition(patch, "Ready", "False", "Error", str(e)[:200])
         raise kopf.TemporaryError(f"Creation failed: {e}", delay=60)
-
-    return result_status
 
 
 @kopf.on.update("sunet.se", "v1alpha1", "openstackprojects")
@@ -204,13 +227,17 @@ def update_project(
     name: str,
     diff: kopf.Diff,
     **_: Any,
-) -> dict[str, Any]:
+) -> None:
     """Handle OpenstackProject updates."""
     logger.info(f"Updating OpenstackProject: {namespace}/{name}")
 
     client = get_openstack_client()
-    result_status = dict(status)
-    result_status["phase"] = "Provisioning"
+    patch.status["phase"] = "Provisioning"
+
+    # Preserve existing status fields
+    for key in ("projectId", "groupId", "networks", "securityGroups", "conditions"):
+        if key in status and key not in patch.status:
+            patch.status[key] = status[key]
 
     try:
         project_name = spec["name"]
@@ -220,13 +247,14 @@ def update_project(
 
         # If we don't have project_id, treat as create
         if not project_id:
-            return create_project(
+            create_project(
                 spec=spec,
                 status=status,
                 patch=patch,
                 namespace=namespace,
                 name=name,
             )
+            return
 
         # Check what changed and update accordingly
         changed_paths = {change[1] for change in diff}
@@ -241,7 +269,7 @@ def update_project(
         if any("quotas" in str(p) for p in changed_paths):
             quotas = spec.get("quotas", {})
             apply_quotas(client, project_id, quotas)
-            set_condition(result_status, "QuotasReady", "True", "Updated", "")
+            _set_patch_condition(patch, "QuotasReady", "True", "Updated", "")
 
         # Update networks if changed
         if any("networks" in str(p) for p in changed_paths):
@@ -251,10 +279,10 @@ def update_project(
             delete_networks(client, old_networks)
             if networks:
                 network_statuses = ensure_networks(client, project_id, networks)
-                result_status["networks"] = network_statuses
+                patch.status["networks"] = network_statuses
             else:
-                result_status["networks"] = []
-            set_condition(result_status, "NetworksReady", "True", "Updated", "")
+                patch.status["networks"] = []
+            _set_patch_condition(patch, "NetworksReady", "True", "Updated", "")
 
         # Update security groups if changed
         if any("securityGroups" in str(p) for p in changed_paths):
@@ -266,12 +294,10 @@ def update_project(
                 sg_statuses = ensure_security_groups(
                     client, project_id, security_groups
                 )
-                result_status["securityGroups"] = sg_statuses
+                patch.status["securityGroups"] = sg_statuses
             else:
-                result_status["securityGroups"] = []
-            set_condition(
-                result_status, "SecurityGroupsReady", "True", "Updated", ""
-            )
+                patch.status["securityGroups"] = []
+            _set_patch_condition(patch, "SecurityGroupsReady", "True", "Updated", "")
 
         # Update role bindings and federation if changed
         if any("roleBindings" in str(p) for p in changed_paths):
@@ -296,21 +322,17 @@ def update_project(
                         manager.add_project_mapping(project_name, users)
                     else:
                         manager.remove_project_mapping(project_name)
-                    set_condition(
-                        result_status, "FederationReady", "True", "Updated", ""
-                    )
+                    _set_patch_condition(patch, "FederationReady", "True", "Updated", "")
 
-        result_status["phase"] = "Ready"
-        result_status["lastSyncTime"] = now_iso()
+        patch.status["phase"] = "Ready"
+        patch.status["lastSyncTime"] = now_iso()
         logger.info(f"Successfully updated OpenstackProject: {namespace}/{name}")
 
     except Exception as e:
         logger.error(f"Failed to update OpenstackProject {namespace}/{name}: {e}")
-        result_status["phase"] = "Error"
-        set_condition(result_status, "Ready", "False", "Error", str(e)[:200])
+        patch.status["phase"] = "Error"
+        _set_patch_condition(patch, "Ready", "False", "Error", str(e)[:200])
         raise kopf.TemporaryError(f"Update failed: {e}", delay=60)
-
-    return result_status
 
 
 @kopf.on.delete("sunet.se", "v1alpha1", "openstackprojects")
@@ -379,14 +401,14 @@ def reconcile_project(
     namespace: str,
     name: str,
     **_: Any,
-) -> dict[str, Any] | None:
+) -> None:
     """Periodic reconciliation to detect and repair drift."""
     if status.get("phase") != "Ready":
         logger.debug(
             f"Skipping reconciliation for {namespace}/{name}: phase is "
             f"{status.get('phase')}"
         )
-        return None
+        return
 
     logger.debug(f"Reconciling OpenstackProject: {namespace}/{name}")
 
@@ -402,11 +424,10 @@ def reconcile_project(
                 f"Project {project_name} not found in OpenStack, triggering recreate"
             )
             # Clear status to trigger recreation
-            return {
-                "phase": "Pending",
-                "projectId": None,
-                "groupId": None,
-            }
+            patch.status["phase"] = "Pending"
+            patch.status["projectId"] = None
+            patch.status["groupId"] = None
+            return
 
         # Verify project ID matches
         if info["project_id"] != status.get("projectId"):
@@ -414,17 +435,15 @@ def reconcile_project(
                 f"Project ID mismatch for {project_name}: "
                 f"expected {status.get('projectId')}, got {info['project_id']}"
             )
-            return {
-                "phase": "Pending",
-                "projectId": info["project_id"],
-                "groupId": info["group_id"],
-            }
+            patch.status["phase"] = "Pending"
+            patch.status["projectId"] = info["project_id"]
+            patch.status["groupId"] = info["group_id"]
+            return
 
-        return {"lastSyncTime": now_iso()}
+        patch.status["lastSyncTime"] = now_iso()
 
     except Exception as e:
         logger.error(f"Reconciliation failed for {namespace}/{name}: {e}")
-        return None
 
 
 def main() -> None:
