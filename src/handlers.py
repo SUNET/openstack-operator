@@ -84,11 +84,13 @@ def configure(settings: kopf.OperatorSettings, **_: Any) -> None:
     settings.posting.level = logging.WARNING
     # Configure persistence
     settings.persistence.finalizer = "sunet.se/openstack-operator"
-    # Set watching namespace (empty = all namespaces)
+    # Set watching namespace - explicit cluster-wide or specific namespace
     # Can be overridden by WATCH_NAMESPACE env var
     watch_namespace = os.environ.get("WATCH_NAMESPACE", "")
     if watch_namespace:
         settings.watching.namespaces = [watch_namespace]
+    else:
+        settings.watching.clusterwide = True
     logger.info("OpenStack operator started")
 
 
