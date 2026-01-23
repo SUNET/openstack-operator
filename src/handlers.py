@@ -299,30 +299,29 @@ def update_project(
                 patch.status["securityGroups"] = []
             _set_patch_condition(patch, "SecurityGroupsReady", "True", "Updated", "")
 
-        # Update role bindings and federation if changed
-        if any("roleBindings" in str(p) for p in changed_paths):
-            role_bindings = spec.get("roleBindings", [])
+        # Always apply role bindings and federation to ensure consistency
+        # This handles cases where the spec hasn't changed but state needs repair
+        role_bindings = spec.get("roleBindings", [])
+        if role_bindings:
             apply_role_bindings(
                 client, project_id, group_id, role_bindings, domain
             )
 
-            # Update federation mapping
-            federation_ref = spec.get("federationRef")
-            if federation_ref:
-                fed_config = get_federation_config(namespace, federation_ref)
-                if fed_config and fed_config["idp_name"]:
-                    users = get_users_from_role_bindings(role_bindings)
-                    manager = FederationManager(
-                        client,
-                        fed_config["idp_name"],
-                        fed_config["idp_remote_id"],
-                        fed_config["sso_domain"],
-                    )
-                    if users:
-                        manager.add_project_mapping(project_name, users)
-                    else:
-                        manager.remove_project_mapping(project_name)
-                    _set_patch_condition(patch, "FederationReady", "True", "Updated", "")
+        # Always update federation mapping
+        federation_ref = spec.get("federationRef")
+        if federation_ref and role_bindings:
+            fed_config = get_federation_config(namespace, federation_ref)
+            if fed_config and fed_config["idp_name"]:
+                users = get_users_from_role_bindings(role_bindings)
+                manager = FederationManager(
+                    client,
+                    fed_config["idp_name"],
+                    fed_config["idp_remote_id"],
+                    fed_config["sso_domain"],
+                )
+                if users:
+                    manager.add_project_mapping(project_name, users)
+                _set_patch_condition(patch, "FederationReady", "True", "Updated", "")
 
         patch.status["phase"] = "Ready"
         patch.status["lastSyncTime"] = now_iso()
