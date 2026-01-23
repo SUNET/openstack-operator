@@ -9,8 +9,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libffi-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user
-RUN useradd -m -u 1000 operator
+# Create non-root user (use existing 'operator' group from base image)
+RUN useradd -m -u 1000 -g operator operator
 
 WORKDIR /app
 
