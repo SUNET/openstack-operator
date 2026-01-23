@@ -14,6 +14,7 @@ from openstack.identity.v3.domain import Domain
 from openstack.identity.v3.group import Group
 from openstack.identity.v3.project import Project
 from openstack.identity.v3.role import Role
+from openstack.identity.v3.user import User
 from openstack.network.v2.network import Network
 from openstack.network.v2.router import Router
 from openstack.network.v2.security_group import SecurityGroup
@@ -210,6 +211,23 @@ class OpenStackClient:
             self.conn.identity.delete_group(group_id)
         except ResourceNotFound:
             logger.debug("Group %s already deleted", group_id)
+
+    # -------------------------------------------------------------------------
+    # User operations
+    # -------------------------------------------------------------------------
+
+    def get_user(self, name: str, domain: str) -> User | None:
+        """Get a user by name within a domain."""
+        domain_obj = self.get_domain(domain)
+        if not domain_obj:
+            return None
+        return self.conn.identity.find_user(name, domain_id=domain_obj.id)
+
+    @retry_on_error()
+    def add_user_to_group(self, user_id: str, group_id: str) -> None:
+        """Add a user to a group."""
+        logger.info("Adding user %s to group %s", user_id, group_id)
+        self.conn.identity.add_user_to_group(user_id, group_id)
 
     # -------------------------------------------------------------------------
     # Role operations

@@ -66,10 +66,37 @@ def apply_role_bindings(
                     f"Group {group_name} not found in domain {group_domain}"
                 )
 
-        # Note: Users in roleBindings are handled via federation mappings,
-        # not direct role assignments. The users list is used by the
-        # federation module to generate mapping rules that place users
-        # in the project's group when they authenticate via SSO.
+        # Add users to the project group directly
+        # Users are identified by their OIDC sub claim (used as username)
+        # This is required for features like application credentials
+        users = binding.get("users", [])
+        user_domain = binding.get("userDomain", project_domain)
+        if users and group_id:
+            _add_users_to_group(client, users, user_domain, group_id)
+
+
+def _add_users_to_group(
+    client: OpenStackClient,
+    users: list[str],
+    user_domain: str,
+    group_id: str,
+) -> None:
+    """Add users to a group by their OIDC sub (username).
+
+    Users must already exist in the domain (created via federation on first login).
+    Users that don't exist yet are skipped - they'll be added on next reconciliation
+    after their first SSO login.
+    """
+    for username in users:
+        user = client.get_user(username, user_domain)
+        if user:
+            client.add_user_to_group(user.id, group_id)
+            logger.info(f"Added user {username} to group {group_id}")
+        else:
+            logger.debug(
+                f"User {username} not found in domain {user_domain}, "
+                "will be added after first SSO login"
+            )
 
 
 def get_users_from_role_bindings(
