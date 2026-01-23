@@ -3,15 +3,28 @@
 import logging
 import os
 import time
+from collections.abc import Callable
 from functools import wraps
-from typing import Any, Callable, TypeVar
+from typing import ParamSpec, TypeVar
 
 import openstack
 from openstack.connection import Connection
 from openstack.exceptions import ConflictException, HttpException, ResourceNotFound
+from openstack.identity.v3.domain import Domain
+from openstack.identity.v3.group import Group
+from openstack.identity.v3.project import Project
+from openstack.identity.v3.role import Role
+from openstack.network.v2.network import Network
+from openstack.network.v2.router import Router
+from openstack.network.v2.security_group import SecurityGroup
+from openstack.network.v2.security_group_rule import SecurityGroupRule
+from openstack.network.v2.subnet import Subnet
+
+from models import OpenStackAPIError, ResourceNotFoundError
 
 logger = logging.getLogger(__name__)
 
+P = ParamSpec("P")
 T = TypeVar("T")
 
 
@@ -19,14 +32,14 @@ def retry_on_error(
     max_retries: int = 3,
     delay: float = 1.0,
     backoff: float = 2.0,
-    exceptions: tuple = (HttpException,),
-) -> Callable[[Callable[..., T]], Callable[..., T]]:
+    exceptions: tuple[type[Exception], ...] = (HttpException,),
+) -> Callable[[Callable[P, T]], Callable[P, T]]:
     """Decorator to retry operations on transient errors."""
 
-    def decorator(func: Callable[..., T]) -> Callable[..., T]:
+    def decorator(func: Callable[P, T]) -> Callable[P, T]:
         @wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> T:
-            last_exception = None
+        def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
+            last_exception: Exception | None = None
             current_delay = delay
 
             for attempt in range(max_retries + 1):
@@ -36,17 +49,27 @@ def retry_on_error(
                     last_exception = e
                     if attempt < max_retries:
                         logger.warning(
-                            f"Attempt {attempt + 1}/{max_retries + 1} failed for "
-                            f"{func.__name__}: {e}. Retrying in {current_delay:.1f}s..."
+                            "Attempt %d/%d failed for %s: %s. Retrying in %.1fs...",
+                            attempt + 1,
+                            max_retries + 1,
+                            func.__name__,
+                            e,
+                            current_delay,
                         )
                         time.sleep(current_delay)
                         current_delay *= backoff
                     else:
                         logger.error(
-                            f"All {max_retries + 1} attempts failed for {func.__name__}"
+                            "All %d attempts failed for %s",
+                            max_retries + 1,
+                            func.__name__,
                         )
 
-            raise last_exception  # type: ignore
+            if last_exception is not None:
+                raise OpenStackAPIError(
+                    f"Operation {func.__name__} failed after {max_retries + 1} attempts"
+                ) from last_exception
+            raise OpenStackAPIError(f"Operation {func.__name__} failed unexpectedly")
 
         return wrapper
 
@@ -75,7 +98,7 @@ class OpenStackClient:
     def conn(self) -> Connection:
         """Get or create OpenStack connection."""
         if self._conn is None:
-            logger.info(f"Connecting to OpenStack cloud: {self.cloud_name}")
+            logger.info("Connecting to OpenStack cloud: %s", self.cloud_name)
             self._conn = openstack.connect(cloud=self.cloud_name)
         return self._conn
 
@@ -90,16 +113,23 @@ class OpenStackClient:
     # -------------------------------------------------------------------------
 
     @retry_on_error()
-    def get_domain(self, name_or_id: str) -> Any | None:
+    def get_domain(self, name_or_id: str) -> Domain | None:
         """Get a domain by name or ID."""
         return self.conn.identity.find_domain(name_or_id)
+
+    def require_domain(self, name_or_id: str) -> Domain:
+        """Get a domain, raising if not found."""
+        domain = self.get_domain(name_or_id)
+        if not domain:
+            raise ResourceNotFoundError(f"Domain not found: {name_or_id}")
+        return domain
 
     # -------------------------------------------------------------------------
     # Project operations
     # -------------------------------------------------------------------------
 
     @retry_on_error()
-    def get_project(self, name: str, domain: str) -> Any | None:
+    def get_project(self, name: str, domain: str) -> Project | None:
         """Get a project by name within a domain."""
         domain_obj = self.get_domain(domain)
         if not domain_obj:
@@ -113,13 +143,10 @@ class OpenStackClient:
         domain: str,
         description: str = "",
         enabled: bool = True,
-    ) -> Any:
+    ) -> Project:
         """Create a new project."""
-        domain_obj = self.get_domain(domain)
-        if not domain_obj:
-            raise ValueError(f"Domain not found: {domain}")
-
-        logger.info(f"Creating project: {name} in domain {domain}")
+        domain_obj = self.require_domain(domain)
+        logger.info("Creating project: %s in domain %s", name, domain)
         return self.conn.identity.create_project(
             name=name,
             domain_id=domain_obj.id,
@@ -133,23 +160,23 @@ class OpenStackClient:
         project_id: str,
         description: str | None = None,
         enabled: bool | None = None,
-    ) -> Any:
+    ) -> Project:
         """Update an existing project."""
-        updates = {}
+        updates: dict[str, object] = {}
         if description is not None:
             updates["description"] = description
         if enabled is not None:
             updates["is_enabled"] = enabled
 
         if updates:
-            logger.info(f"Updating project {project_id}: {updates}")
+            logger.info("Updating project %s: %s", project_id, updates)
             return self.conn.identity.update_project(project_id, **updates)
         return self.conn.identity.get_project(project_id)
 
     @retry_on_error()
     def delete_project(self, project_id: str) -> None:
         """Delete a project."""
-        logger.info(f"Deleting project: {project_id}")
+        logger.info("Deleting project: %s", project_id)
         self.conn.identity.delete_project(project_id)
 
     # -------------------------------------------------------------------------
@@ -157,7 +184,7 @@ class OpenStackClient:
     # -------------------------------------------------------------------------
 
     @retry_on_error()
-    def get_group(self, name: str, domain: str) -> Any | None:
+    def get_group(self, name: str, domain: str) -> Group | None:
         """Get a group by name within a domain."""
         domain_obj = self.get_domain(domain)
         if not domain_obj:
@@ -165,13 +192,10 @@ class OpenStackClient:
         return self.conn.identity.find_group(name, domain_id=domain_obj.id)
 
     @retry_on_error()
-    def create_group(self, name: str, domain: str, description: str = "") -> Any:
+    def create_group(self, name: str, domain: str, description: str = "") -> Group:
         """Create a new group."""
-        domain_obj = self.get_domain(domain)
-        if not domain_obj:
-            raise ValueError(f"Domain not found: {domain}")
-
-        logger.info(f"Creating group: {name} in domain {domain}")
+        domain_obj = self.require_domain(domain)
+        logger.info("Creating group: %s in domain %s", name, domain)
         return self.conn.identity.create_group(
             name=name,
             domain_id=domain_obj.id,
@@ -181,15 +205,18 @@ class OpenStackClient:
     @retry_on_error()
     def delete_group(self, group_id: str) -> None:
         """Delete a group."""
-        logger.info(f"Deleting group: {group_id}")
-        self.conn.identity.delete_group(group_id)
+        logger.info("Deleting group: %s", group_id)
+        try:
+            self.conn.identity.delete_group(group_id)
+        except ResourceNotFound:
+            logger.debug("Group %s already deleted", group_id)
 
     # -------------------------------------------------------------------------
     # Role operations
     # -------------------------------------------------------------------------
 
     @retry_on_error()
-    def get_role(self, name: str) -> Any | None:
+    def get_role(self, name: str) -> Role | None:
         """Get a role by name."""
         return self.conn.identity.find_role(name)
 
@@ -199,7 +226,10 @@ class OpenStackClient:
     ) -> None:
         """Assign a role to a group on a project."""
         logger.info(
-            f"Assigning role {role_id} to group {group_id} on project {project_id}"
+            "Assigning role %s to group %s on project %s",
+            role_id,
+            group_id,
+            project_id,
         )
         try:
             self.conn.identity.assign_project_role_to_group(
@@ -208,7 +238,7 @@ class OpenStackClient:
                 role=role_id,
             )
         except ConflictException:
-            logger.debug(f"Role {role_id} already assigned to group {group_id}")
+            logger.debug("Role %s already assigned to group %s", role_id, group_id)
 
     @retry_on_error()
     def revoke_role_from_group(
@@ -216,7 +246,10 @@ class OpenStackClient:
     ) -> None:
         """Revoke a role from a group on a project."""
         logger.info(
-            f"Revoking role {role_id} from group {group_id} on project {project_id}"
+            "Revoking role %s from group %s on project %s",
+            role_id,
+            group_id,
+            project_id,
         )
         try:
             self.conn.identity.unassign_project_role_from_group(
@@ -225,7 +258,7 @@ class OpenStackClient:
                 role=role_id,
             )
         except ResourceNotFound:
-            logger.debug(f"Role {role_id} not assigned to group {group_id}")
+            logger.debug("Role %s not assigned to group %s", role_id, group_id)
 
     # -------------------------------------------------------------------------
     # Quota operations
@@ -237,18 +270,20 @@ class OpenStackClient:
         if not quotas:
             return
 
-        logger.info(f"Setting compute quotas for project {project_id}: {quotas}")
-        quota_args = {}
-        if "instances" in quotas:
-            quota_args["instances"] = quotas["instances"]
-        if "cores" in quotas:
-            quota_args["cores"] = quotas["cores"]
-        if "ramMB" in quotas:
-            quota_args["ram"] = quotas["ramMB"]
-        if "serverGroups" in quotas:
-            quota_args["server_groups"] = quotas["serverGroups"]
-        if "serverGroupMembers" in quotas:
-            quota_args["server_group_members"] = quotas["serverGroupMembers"]
+        logger.info("Setting compute quotas for project %s: %s", project_id, quotas)
+        quota_args: dict[str, int] = {}
+
+        quota_mapping = {
+            "instances": "instances",
+            "cores": "cores",
+            "ramMB": "ram",
+            "serverGroups": "server_groups",
+            "serverGroupMembers": "server_group_members",
+        }
+
+        for spec_key, api_key in quota_mapping.items():
+            if spec_key in quotas:
+                quota_args[api_key] = quotas[spec_key]
 
         if quota_args:
             self.conn.compute.update_quota_set(project_id, **quota_args)
@@ -259,18 +294,20 @@ class OpenStackClient:
         if not quotas:
             return
 
-        logger.info(f"Setting volume quotas for project {project_id}: {quotas}")
-        quota_args = {}
-        if "volumes" in quotas:
-            quota_args["volumes"] = quotas["volumes"]
-        if "volumesGB" in quotas:
-            quota_args["gigabytes"] = quotas["volumesGB"]
-        if "snapshots" in quotas:
-            quota_args["snapshots"] = quotas["snapshots"]
-        if "backups" in quotas:
-            quota_args["backups"] = quotas["backups"]
-        if "backupsGB" in quotas:
-            quota_args["backup_gigabytes"] = quotas["backupsGB"]
+        logger.info("Setting volume quotas for project %s: %s", project_id, quotas)
+        quota_args: dict[str, int] = {}
+
+        quota_mapping = {
+            "volumes": "volumes",
+            "volumesGB": "gigabytes",
+            "snapshots": "snapshots",
+            "backups": "backups",
+            "backupsGB": "backup_gigabytes",
+        }
+
+        for spec_key, api_key in quota_mapping.items():
+            if spec_key in quotas:
+                quota_args[api_key] = quotas[spec_key]
 
         if quota_args:
             self.conn.block_storage.update_quota_set(project_id, **quota_args)
@@ -281,22 +318,22 @@ class OpenStackClient:
         if not quotas:
             return
 
-        logger.info(f"Setting network quotas for project {project_id}: {quotas}")
-        quota_args = {}
-        if "floatingIps" in quotas:
-            quota_args["floatingip"] = quotas["floatingIps"]
-        if "networks" in quotas:
-            quota_args["network"] = quotas["networks"]
-        if "subnets" in quotas:
-            quota_args["subnet"] = quotas["subnets"]
-        if "routers" in quotas:
-            quota_args["router"] = quotas["routers"]
-        if "ports" in quotas:
-            quota_args["port"] = quotas["ports"]
-        if "securityGroups" in quotas:
-            quota_args["security_group"] = quotas["securityGroups"]
-        if "securityGroupRules" in quotas:
-            quota_args["security_group_rule"] = quotas["securityGroupRules"]
+        logger.info("Setting network quotas for project %s: %s", project_id, quotas)
+        quota_args: dict[str, int] = {}
+
+        quota_mapping = {
+            "floatingIps": "floatingip",
+            "networks": "network",
+            "subnets": "subnet",
+            "routers": "router",
+            "ports": "port",
+            "securityGroups": "security_group",
+            "securityGroupRules": "security_group_rule",
+        }
+
+        for spec_key, api_key in quota_mapping.items():
+            if spec_key in quotas:
+                quota_args[api_key] = quotas[spec_key]
 
         if quota_args:
             self.conn.network.update_quota(project_id, **quota_args)
@@ -306,25 +343,28 @@ class OpenStackClient:
     # -------------------------------------------------------------------------
 
     @retry_on_error()
-    def get_network(self, name: str, project_id: str) -> Any | None:
+    def get_network(self, name: str, project_id: str) -> Network | None:
         """Get a network by name within a project."""
         networks = list(self.conn.network.networks(name=name, project_id=project_id))
         return networks[0] if networks else None
 
     @retry_on_error()
-    def create_network(self, name: str, project_id: str) -> Any:
+    def create_network(self, name: str, project_id: str) -> Network:
         """Create a network."""
-        logger.info(f"Creating network: {name} in project {project_id}")
+        logger.info("Creating network: %s in project %s", name, project_id)
         return self.conn.network.create_network(name=name, project_id=project_id)
 
     @retry_on_error()
     def delete_network(self, network_id: str) -> None:
         """Delete a network."""
-        logger.info(f"Deleting network: {network_id}")
-        self.conn.network.delete_network(network_id)
+        logger.info("Deleting network: %s", network_id)
+        try:
+            self.conn.network.delete_network(network_id)
+        except ResourceNotFound:
+            logger.debug("Network %s already deleted", network_id)
 
     @retry_on_error()
-    def get_subnet(self, name: str, network_id: str) -> Any | None:
+    def get_subnet(self, name: str, network_id: str) -> Subnet | None:
         """Get a subnet by name within a network."""
         subnets = list(self.conn.network.subnets(name=name, network_id=network_id))
         return subnets[0] if subnets else None
@@ -337,9 +377,9 @@ class OpenStackClient:
         cidr: str,
         enable_dhcp: bool = True,
         dns_nameservers: list[str] | None = None,
-    ) -> Any:
+    ) -> Subnet:
         """Create a subnet."""
-        logger.info(f"Creating subnet: {name} with CIDR {cidr}")
+        logger.info("Creating subnet: %s with CIDR %s", name, cidr)
         return self.conn.network.create_subnet(
             name=name,
             network_id=network_id,
@@ -352,11 +392,14 @@ class OpenStackClient:
     @retry_on_error()
     def delete_subnet(self, subnet_id: str) -> None:
         """Delete a subnet."""
-        logger.info(f"Deleting subnet: {subnet_id}")
-        self.conn.network.delete_subnet(subnet_id)
+        logger.info("Deleting subnet: %s", subnet_id)
+        try:
+            self.conn.network.delete_subnet(subnet_id)
+        except ResourceNotFound:
+            logger.debug("Subnet %s already deleted", subnet_id)
 
     @retry_on_error()
-    def get_router(self, name: str, project_id: str) -> Any | None:
+    def get_router(self, name: str, project_id: str) -> Router | None:
         """Get a router by name within a project."""
         routers = list(self.conn.network.routers(name=name, project_id=project_id))
         return routers[0] if routers else None
@@ -368,9 +411,9 @@ class OpenStackClient:
         project_id: str,
         external_network_id: str | None = None,
         enable_snat: bool = True,
-    ) -> Any:
+    ) -> Router:
         """Create a router."""
-        logger.info(f"Creating router: {name} in project {project_id}")
+        logger.info("Creating router: %s in project %s", name, project_id)
         external_gateway_info = None
         if external_network_id:
             external_gateway_info = {
@@ -386,35 +429,44 @@ class OpenStackClient:
     @retry_on_error()
     def add_router_interface(self, router_id: str, subnet_id: str) -> None:
         """Add a subnet interface to a router."""
-        logger.info(f"Adding interface for subnet {subnet_id} to router {router_id}")
+        logger.info("Adding interface for subnet %s to router %s", subnet_id, router_id)
         try:
             self.conn.network.add_interface_to_router(router_id, subnet_id=subnet_id)
         except ConflictException:
             logger.debug(
-                f"Interface for subnet {subnet_id} already on router {router_id}"
+                "Interface for subnet %s already on router %s", subnet_id, router_id
             )
 
     @retry_on_error()
     def remove_router_interface(self, router_id: str, subnet_id: str) -> None:
         """Remove a subnet interface from a router."""
         logger.info(
-            f"Removing interface for subnet {subnet_id} from router {router_id}"
+            "Removing interface for subnet %s from router %s", subnet_id, router_id
         )
         try:
-            self.conn.network.remove_interface_from_router(router_id, subnet_id=subnet_id)
+            self.conn.network.remove_interface_from_router(
+                router_id, subnet_id=subnet_id
+            )
         except ResourceNotFound:
-            logger.debug(f"Interface for subnet {subnet_id} not on router {router_id}")
+            logger.debug(
+                "Interface for subnet %s not on router %s", subnet_id, router_id
+            )
 
     @retry_on_error()
     def delete_router(self, router_id: str) -> None:
         """Delete a router."""
-        logger.info(f"Deleting router: {router_id}")
-        self.conn.network.delete_router(router_id)
+        logger.info("Deleting router: %s", router_id)
+        try:
+            self.conn.network.delete_router(router_id)
+        except ResourceNotFound:
+            logger.debug("Router %s already deleted", router_id)
 
     @retry_on_error()
-    def get_external_network(self, name: str) -> Any | None:
+    def get_external_network(self, name: str) -> Network | None:
         """Get an external network by name."""
-        networks = list(self.conn.network.networks(name=name, is_router_external=True))
+        networks = list(
+            self.conn.network.networks(name=name, is_router_external=True)
+        )
         return networks[0] if networks else None
 
     # -------------------------------------------------------------------------
@@ -422,17 +474,19 @@ class OpenStackClient:
     # -------------------------------------------------------------------------
 
     @retry_on_error()
-    def get_security_group(self, name: str, project_id: str) -> Any | None:
+    def get_security_group(self, name: str, project_id: str) -> SecurityGroup | None:
         """Get a security group by name within a project."""
-        sgs = list(self.conn.network.security_groups(name=name, project_id=project_id))
+        sgs = list(
+            self.conn.network.security_groups(name=name, project_id=project_id)
+        )
         return sgs[0] if sgs else None
 
     @retry_on_error()
     def create_security_group(
         self, name: str, project_id: str, description: str = ""
-    ) -> Any:
+    ) -> SecurityGroup:
         """Create a security group."""
-        logger.info(f"Creating security group: {name} in project {project_id}")
+        logger.info("Creating security group: %s in project %s", name, project_id)
         return self.conn.network.create_security_group(
             name=name,
             project_id=project_id,
@@ -442,8 +496,11 @@ class OpenStackClient:
     @retry_on_error()
     def delete_security_group(self, sg_id: str) -> None:
         """Delete a security group."""
-        logger.info(f"Deleting security group: {sg_id}")
-        self.conn.network.delete_security_group(sg_id)
+        logger.info("Deleting security group: %s", sg_id)
+        try:
+            self.conn.network.delete_security_group(sg_id)
+        except ResourceNotFound:
+            logger.debug("Security group %s already deleted", sg_id)
 
     @retry_on_error()
     def create_security_group_rule(
@@ -456,11 +513,15 @@ class OpenStackClient:
         remote_ip_prefix: str | None = None,
         remote_group_id: str | None = None,
         ethertype: str = "IPv4",
-    ) -> Any:
+    ) -> SecurityGroupRule | None:
         """Create a security group rule."""
         logger.info(
-            f"Creating security group rule: {direction} {protocol} "
-            f"{port_range_min}-{port_range_max} in {security_group_id}"
+            "Creating security group rule: %s %s %s-%s in %s",
+            direction,
+            protocol,
+            port_range_min,
+            port_range_max,
+            security_group_id,
         )
         try:
             return self.conn.network.create_security_group_rule(
@@ -482,7 +543,7 @@ class OpenStackClient:
     # -------------------------------------------------------------------------
 
     @retry_on_error()
-    def get_identity_provider(self, idp_id: str) -> Any | None:
+    def get_identity_provider(self, idp_id: str) -> object | None:
         """Get an identity provider by ID."""
         try:
             return self.conn.identity.get_identity_provider(idp_id)
@@ -490,9 +551,11 @@ class OpenStackClient:
             return None
 
     @retry_on_error()
-    def create_identity_provider(self, idp_id: str, remote_ids: list[str]) -> Any:
+    def create_identity_provider(
+        self, idp_id: str, remote_ids: list[str]
+    ) -> object:
         """Create an identity provider."""
-        logger.info(f"Creating identity provider: {idp_id}")
+        logger.info("Creating identity provider: %s", idp_id)
         return self.conn.identity.create_identity_provider(
             id=idp_id,
             remote_ids=remote_ids,
@@ -500,7 +563,7 @@ class OpenStackClient:
         )
 
     @retry_on_error()
-    def get_mapping(self, mapping_id: str) -> Any | None:
+    def get_mapping(self, mapping_id: str) -> object | None:
         """Get a federation mapping by ID."""
         try:
             return self.conn.identity.get_mapping(mapping_id)
@@ -508,19 +571,25 @@ class OpenStackClient:
             return None
 
     @retry_on_error()
-    def create_mapping(self, mapping_id: str, rules: list[dict]) -> Any:
+    def create_mapping(
+        self, mapping_id: str, rules: list[dict[str, object]]
+    ) -> object:
         """Create a federation mapping."""
-        logger.info(f"Creating mapping: {mapping_id}")
+        logger.info("Creating mapping: %s", mapping_id)
         return self.conn.identity.create_mapping(id=mapping_id, rules=rules)
 
     @retry_on_error()
-    def update_mapping(self, mapping_id: str, rules: list[dict]) -> Any:
+    def update_mapping(
+        self, mapping_id: str, rules: list[dict[str, object]]
+    ) -> object:
         """Update a federation mapping."""
-        logger.info(f"Updating mapping: {mapping_id}")
+        logger.info("Updating mapping: %s", mapping_id)
         return self.conn.identity.update_mapping(mapping_id, rules=rules)
 
     @retry_on_error()
-    def get_federation_protocol(self, idp_id: str, protocol_id: str) -> Any | None:
+    def get_federation_protocol(
+        self, idp_id: str, protocol_id: str
+    ) -> object | None:
         """Get a federation protocol."""
         try:
             return self.conn.identity.get_federation_protocol(protocol_id, idp_id)
@@ -530,9 +599,9 @@ class OpenStackClient:
     @retry_on_error()
     def create_federation_protocol(
         self, idp_id: str, protocol_id: str, mapping_id: str
-    ) -> Any:
+    ) -> object:
         """Create a federation protocol."""
-        logger.info(f"Creating federation protocol: {protocol_id} for IdP {idp_id}")
+        logger.info("Creating federation protocol: %s for IdP %s", protocol_id, idp_id)
         return self.conn.identity.create_federation_protocol(
             protocol_id,
             idp_id,
