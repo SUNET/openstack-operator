@@ -170,13 +170,23 @@ class FederationManager:
             if not self._rule_matches_group(rule, group_name)
         ]
 
-        if len(new_rules) != len(current_rules):
-            self.update_mapping(new_rules)
-            logger.info(f"Removed federation mapping for project {project_name}")
-        else:
+        if len(new_rules) == len(current_rules):
             logger.debug(
                 f"No federation mapping found for project {project_name}"
             )
+            return
+
+        if not new_rules:
+            # Keystone doesn't allow empty mapping rules
+            # Keep the mapping but log a warning
+            logger.warning(
+                f"Cannot remove last mapping rule for {project_name}, "
+                "Keystone requires at least one rule"
+            )
+            return
+
+        self.update_mapping(new_rules)
+        logger.info(f"Removed federation mapping for project {project_name}")
 
     def _rule_matches_group(
         self, rule: dict[str, Any], group_name: str
@@ -216,6 +226,12 @@ def sync_federation_mapping(
         if users:
             rule = generate_mapping_rule(project_name, users, sso_domain)
             rules.append(rule)
+
+    if not rules:
+        logger.warning(
+            "No project mappings to sync, skipping (Keystone requires at least one rule)"
+        )
+        return
 
     manager.update_mapping(rules)
     manager.ensure_federation_protocol()
