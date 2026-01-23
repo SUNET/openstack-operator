@@ -2,20 +2,27 @@
 
 import logging
 import os
+import sys
+from pathlib import Path
 from typing import Any
+
+# Add src directory to path for imports when run as script by Kopf
+_src_dir = Path(__file__).parent
+if str(_src_dir) not in sys.path:
+    sys.path.insert(0, str(_src_dir))
 
 import kopf
 from kubernetes import client as k8s_client
 from kubernetes import config as k8s_config
 
-from .openstack_client import OpenStackClient
-from .resources.federation import FederationManager
-from .resources.network import delete_networks, ensure_networks
-from .resources.project import delete_project, ensure_project, get_project_info
-from .resources.quota import apply_quotas
-from .resources.role_binding import apply_role_bindings, get_users_from_role_bindings
-from .resources.security_group import delete_security_groups, ensure_security_groups
-from .utils import now_iso, set_condition
+from openstack_client import OpenStackClient
+from resources.federation import FederationManager
+from resources.network import delete_networks, ensure_networks
+from resources.project import delete_project, ensure_project, get_project_info
+from resources.quota import apply_quotas
+from resources.role_binding import apply_role_bindings, get_users_from_role_bindings
+from resources.security_group import delete_security_groups, ensure_security_groups
+from utils import now_iso, set_condition
 
 logger = logging.getLogger(__name__)
 

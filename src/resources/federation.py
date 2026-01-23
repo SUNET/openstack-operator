@@ -4,8 +4,8 @@ import json
 import logging
 from typing import Any
 
-from ..openstack_client import OpenStackClient
-from ..utils import make_group_name
+from openstack_client import OpenStackClient
+from utils import make_group_name
 
 logger = logging.getLogger(__name__)
 

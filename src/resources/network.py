@@ -3,7 +3,7 @@
 import logging
 from typing import Any
 
-from ..openstack_client import OpenStackClient
+from openstack_client import OpenStackClient
 
 logger = logging.getLogger(__name__)
 
