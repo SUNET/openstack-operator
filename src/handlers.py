@@ -20,7 +20,11 @@ from resources.federation import FederationManager
 from resources.network import delete_networks, ensure_networks
 from resources.project import delete_project, ensure_project, get_project_info
 from resources.quota import apply_quotas
-from resources.garbage_collection import collect_garbage, get_expected_projects_from_crs
+from resources.garbage_collection import (
+    collect_garbage,
+    get_expected_projects_from_crs,
+    get_federation_config_from_crs,
+)
 from resources.role_binding import apply_role_bindings, get_users_from_role_bindings
 from resources.security_group import delete_security_groups, ensure_security_groups
 from utils import now_iso
@@ -310,7 +314,7 @@ def update_project(
 
         # Always update federation mapping
         federation_ref = spec.get("federationRef")
-        if federation_ref and role_bindings:
+        if federation_ref:
             fed_config = get_federation_config(namespace, federation_ref)
             if fed_config and fed_config["idp_name"]:
                 users = get_users_from_role_bindings(role_bindings)
@@ -322,6 +326,9 @@ def update_project(
                 )
                 if users:
                     manager.add_project_mapping(project_name, users)
+                else:
+                    # Remove mapping when no users remain
+                    manager.remove_project_mapping(project_name)
                 _set_patch_condition(patch, "FederationReady", "True", "Updated", "")
 
         patch.status["phase"] = "Ready"
@@ -515,14 +522,21 @@ async def garbage_collector(
             expected_projects = get_expected_projects_from_crs(cr_items)
             logger.debug(f"Expected projects: {expected_projects}")
 
+            # Get federation config for cleaning up orphaned mappings
+            core_api = k8s_client.CoreV1Api()
+            federation_config = get_federation_config_from_crs(cr_items, core_api)
+
             # Run GC
             client = get_openstack_client()
-            result = collect_garbage(client, managed_domain, expected_projects)
+            result = collect_garbage(
+                client, managed_domain, expected_projects, federation_config
+            )
 
-            if result["deleted_projects"] or result["deleted_groups"]:
+            if result["deleted_projects"] or result["deleted_groups"] or result["deleted_mappings"]:
                 logger.info(
                     f"GC completed: deleted {len(result['deleted_projects'])} projects, "
-                    f"{len(result['deleted_groups'])} groups"
+                    f"{len(result['deleted_groups'])} groups, "
+                    f"{len(result['deleted_mappings'])} mappings"
                 )
             else:
                 logger.debug("GC completed: no orphaned resources found")
