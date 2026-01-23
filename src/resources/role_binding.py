@@ -39,7 +39,17 @@ def apply_role_bindings(
             logger.warning(f"Role {role_name} not found, skipping")
             continue
 
-        # Handle group bindings
+        # Always assign the role to the project's user group
+        # This is required for federated users who are placed in this group
+        # via the federation mapping
+        if group_id:
+            client.assign_role_to_group(role.id, group_id, project_id)
+            logger.info(
+                f"Assigned role {role_name} to project group {group_id} "
+                f"on project {project_id}"
+            )
+
+        # Handle additional explicit group bindings
         groups = binding.get("groups", [])
         group_domain = binding.get("groupDomain", project_domain)
 
