@@ -153,7 +153,7 @@ class OpenStackClient:
         current_tags = set(project.tags or [])
         if tag not in current_tags:
             current_tags.add(tag)
-            self.conn.identity.set_project_tags(project_id, list(current_tags))
+            self.conn.identity.update_project(project_id, tags=list(current_tags))
             logger.debug("Added tag %s to project %s", tag, project_id)
 
     def project_has_tag(self, project_id: str, tag: str) -> bool:
