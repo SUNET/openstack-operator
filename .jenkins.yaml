@@ -1,0 +1,15 @@
+---
+environment_variables:
+  IMAGE_VERSION: "0.1.0"
+git:
+  branch: main
+triggers:
+  cron: "@daily"
+clean_workspace: true
+builders:
+  - docker
+docker_name: platform/openstack-operator
+docker_tags:
+  - "${IMAGE_VERSION}"
+  - "latest"
+docker_no_cache: true
