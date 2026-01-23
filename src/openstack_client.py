@@ -401,10 +401,15 @@ class OpenStackClient:
         return networks[0] if networks else None
 
     @retry_on_error()
-    def create_network(self, name: str, project_id: str) -> Network:
+    def create_network(
+        self, name: str, project_id: str, tags: list[str] | None = None
+    ) -> Network:
         """Create a network."""
         logger.info("Creating network: %s in project %s", name, project_id)
-        return self.conn.network.create_network(name=name, project_id=project_id)
+        network = self.conn.network.create_network(name=name, project_id=project_id)
+        if tags:
+            self.conn.network.set_tags(network, tags)
+        return network
 
     @retry_on_error()
     def delete_network(self, network_id: str) -> None:
@@ -429,10 +434,11 @@ class OpenStackClient:
         cidr: str,
         enable_dhcp: bool = True,
         dns_nameservers: list[str] | None = None,
+        tags: list[str] | None = None,
     ) -> Subnet:
         """Create a subnet."""
         logger.info("Creating subnet: %s with CIDR %s", name, cidr)
-        return self.conn.network.create_subnet(
+        subnet = self.conn.network.create_subnet(
             name=name,
             network_id=network_id,
             cidr=cidr,
@@ -440,6 +446,9 @@ class OpenStackClient:
             is_dhcp_enabled=enable_dhcp,
             dns_nameservers=dns_nameservers or [],
         )
+        if tags:
+            self.conn.network.set_tags(subnet, tags)
+        return subnet
 
     @retry_on_error()
     def delete_subnet(self, subnet_id: str) -> None:
@@ -463,6 +472,7 @@ class OpenStackClient:
         project_id: str,
         external_network_id: str | None = None,
         enable_snat: bool = True,
+        tags: list[str] | None = None,
     ) -> Router:
         """Create a router."""
         logger.info("Creating router: %s in project %s", name, project_id)
@@ -472,11 +482,14 @@ class OpenStackClient:
                 "network_id": external_network_id,
                 "enable_snat": enable_snat,
             }
-        return self.conn.network.create_router(
+        router = self.conn.network.create_router(
             name=name,
             project_id=project_id,
             external_gateway_info=external_gateway_info,
         )
+        if tags:
+            self.conn.network.set_tags(router, tags)
+        return router
 
     @retry_on_error()
     def add_router_interface(self, router_id: str, subnet_id: str) -> None:
@@ -535,15 +548,22 @@ class OpenStackClient:
 
     @retry_on_error()
     def create_security_group(
-        self, name: str, project_id: str, description: str = ""
+        self,
+        name: str,
+        project_id: str,
+        description: str = "",
+        tags: list[str] | None = None,
     ) -> SecurityGroup:
         """Create a security group."""
         logger.info("Creating security group: %s in project %s", name, project_id)
-        return self.conn.network.create_security_group(
+        sg = self.conn.network.create_security_group(
             name=name,
             project_id=project_id,
             description=description,
         )
+        if tags:
+            self.conn.network.set_tags(sg, tags)
+        return sg
 
     @retry_on_error()
     def delete_security_group(self, sg_id: str) -> None:

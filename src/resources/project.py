@@ -3,13 +3,11 @@
 import logging
 from typing import Any
 
+from constants import MANAGED_BY_DESCRIPTION_PREFIX, MANAGED_BY_TAG
 from openstack_client import OpenStackClient
 from utils import make_group_name
 
 logger = logging.getLogger(__name__)
-
-# Tag used to identify operator-managed resources
-MANAGED_BY_TAG = "managed-by-openstack-operator"
 
 
 def ensure_project(
@@ -46,7 +44,9 @@ def ensure_project(
         logger.info(f"Group {group_name} already exists with ID {group.id}")
         group_id = group.id
     else:
-        group = client.create_group(group_name, domain, f"Users for {name}")
+        # Use description prefix to mark as managed (groups don't support tags)
+        group_desc = f"{MANAGED_BY_DESCRIPTION_PREFIX}Users for {name}"
+        group = client.create_group(group_name, domain, group_desc)
         group_id = group.id
         logger.info(f"Created group {group_name} with ID {group_id}")
 

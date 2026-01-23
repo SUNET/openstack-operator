@@ -3,9 +3,9 @@
 import logging
 from typing import Any
 
+from constants import MANAGED_BY_TAG
 from openstack_client import OpenStackClient
 from resources.federation import FederationManager
-from resources.project import MANAGED_BY_TAG
 from utils import make_group_name
 
 logger = logging.getLogger(__name__)

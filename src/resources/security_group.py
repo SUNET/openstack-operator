@@ -3,9 +3,13 @@
 import logging
 from typing import Any
 
+from constants import MANAGED_BY_TAG
 from openstack_client import OpenStackClient
 
 logger = logging.getLogger(__name__)
+
+# Tags to apply to all created resources
+_RESOURCE_TAGS = [MANAGED_BY_TAG]
 
 
 def ensure_security_group(
@@ -37,7 +41,7 @@ def ensure_security_group(
         logger.info(f"Security group {name} already exists with ID {sg.id}")
         result["id"] = sg.id
     else:
-        sg = client.create_security_group(name, project_id, description)
+        sg = client.create_security_group(name, project_id, description, tags=_RESOURCE_TAGS)
         result["id"] = sg.id
         logger.info(f"Created security group {name} with ID {sg.id}")
 
@@ -108,7 +112,7 @@ def ensure_security_groups(
             logger.info(f"Security group {name} already exists with ID {sg.id}")
             sg_id = sg.id
         else:
-            sg = client.create_security_group(name, project_id, description)
+            sg = client.create_security_group(name, project_id, description, tags=_RESOURCE_TAGS)
             sg_id = sg.id
             logger.info(f"Created security group {name} with ID {sg.id}")
 

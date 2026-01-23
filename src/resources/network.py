@@ -3,9 +3,13 @@
 import logging
 from typing import Any
 
+from constants import MANAGED_BY_TAG
 from openstack_client import OpenStackClient
 
 logger = logging.getLogger(__name__)
+
+# Tags to apply to all created resources
+_RESOURCE_TAGS = [MANAGED_BY_TAG]
 
 
 def ensure_network(
@@ -37,7 +41,7 @@ def ensure_network(
         logger.info(f"Network {name} already exists with ID {network.id}")
         result["networkId"] = network.id
     else:
-        network = client.create_network(name, project_id)
+        network = client.create_network(name, project_id, tags=_RESOURCE_TAGS)
         result["networkId"] = network.id
         logger.info(f"Created network {name} with ID {network.id}")
 
@@ -54,6 +58,7 @@ def ensure_network(
             cidr,
             enable_dhcp=enable_dhcp,
             dns_nameservers=dns_nameservers,
+            tags=_RESOURCE_TAGS,
         )
         result["subnetId"] = subnet.id
         logger.info(f"Created subnet {subnet_name} with ID {subnet.id}")
@@ -86,6 +91,7 @@ def ensure_network(
                 project_id,
                 external_network_id=external_network_id,
                 enable_snat=enable_snat,
+                tags=_RESOURCE_TAGS,
             )
             result["routerId"] = router.id
             logger.info(f"Created router {router_name} with ID {router.id}")
