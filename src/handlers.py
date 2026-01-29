@@ -25,9 +25,13 @@ from resources.garbage_collection import (
     get_expected_projects_from_crs,
     get_federation_config_from_crs,
 )
+from resources.registry import ResourceRegistry
 from resources.role_binding import apply_role_bindings, get_users_from_role_bindings
 from resources.security_group import delete_security_groups, ensure_security_groups
 from utils import now_iso
+
+# Import cluster-scoped resource handlers (registers with Kopf)
+import handlers  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -65,8 +69,9 @@ def _set_patch_condition(
     )
 
 
-# Global OpenStack client (initialized on startup)
+# Global OpenStack client and registry (initialized on startup)
 _os_client: OpenStackClient | None = None
+_registry: ResourceRegistry | None = None
 
 
 def get_openstack_client() -> OpenStackClient:
@@ -75,6 +80,14 @@ def get_openstack_client() -> OpenStackClient:
     if _os_client is None:
         _os_client = OpenStackClient()
     return _os_client
+
+
+def get_registry() -> ResourceRegistry:
+    """Get or create the resource registry."""
+    global _registry
+    if _registry is None:
+        _registry = ResourceRegistry()
+    return _registry
 
 
 def get_federation_config(

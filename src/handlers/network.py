@@ -1,0 +1,276 @@
+"""Kopf handlers for OpenstackNetwork CRD (provider networks)."""
+
+import logging
+from typing import Any
+
+import kopf
+
+from openstack_client import OpenStackClient
+from resources.provider_network import (
+    delete_provider_network,
+    ensure_provider_network,
+    get_provider_network_info,
+)
+from resources.registry import ResourceRegistry
+from utils import now_iso
+
+logger = logging.getLogger(__name__)
+
+# Module-level registry and client (initialized lazily)
+_registry: ResourceRegistry | None = None
+_os_client: OpenStackClient | None = None
+
+
+def get_registry() -> ResourceRegistry:
+    """Get or create the resource registry."""
+    global _registry
+    if _registry is None:
+        _registry = ResourceRegistry()
+    return _registry
+
+
+def get_openstack_client() -> OpenStackClient:
+    """Get or create the OpenStack client."""
+    global _os_client
+    if _os_client is None:
+        _os_client = OpenStackClient()
+    return _os_client
+
+
+def _set_patch_condition(
+    patch: kopf.Patch,
+    condition_type: str,
+    condition_status: str,
+    reason: str = "",
+    message: str = "",
+) -> None:
+    """Set or update a condition in patch.status.conditions."""
+    if "conditions" not in patch.status:
+        patch.status["conditions"] = []
+
+    conditions: list[dict[str, str]] = patch.status["conditions"]
+
+    for condition in conditions:
+        if condition["type"] == condition_type:
+            if condition["status"] != condition_status:
+                condition["status"] = condition_status
+                condition["lastTransitionTime"] = now_iso()
+            condition["reason"] = reason
+            condition["message"] = message
+            return
+
+    conditions.append(
+        {
+            "type": condition_type,
+            "status": condition_status,
+            "reason": reason,
+            "message": message,
+            "lastTransitionTime": now_iso(),
+        }
+    )
+
+
+@kopf.on.create("sunet.se", "v1alpha1", "openstacknetworks")
+def create_network_handler(
+    spec: dict[str, Any],
+    patch: kopf.Patch,
+    name: str,
+    **_: Any,
+) -> None:
+    """Handle OpenstackNetwork creation."""
+    logger.info(f"Creating OpenstackNetwork: {name}")
+
+    patch.status["phase"] = "Provisioning"
+    patch.status["conditions"] = []
+
+    client = get_openstack_client()
+    registry = get_registry()
+
+    try:
+        network_name = spec["name"]
+
+        _set_patch_condition(patch, "NetworkReady", "False", "Creating", "")
+
+        result = ensure_provider_network(client, spec)
+
+        # Register in ConfigMap with subnet IDs
+        subnet_ids = [s["subnetId"] for s in result.get("subnets", [])]
+        registry.register(
+            "provider_networks",
+            network_name,
+            result["networkId"],
+            cr_name=name,
+            extra={"subnets": subnet_ids},
+        )
+
+        patch.status["networkId"] = result["networkId"]
+        patch.status["subnets"] = result.get("subnets", [])
+
+        _set_patch_condition(patch, "NetworkReady", "True", "Created", "")
+        patch.status["phase"] = "Ready"
+        patch.status["lastSyncTime"] = now_iso()
+
+        logger.info(
+            f"Successfully created OpenstackNetwork: {name} (id={result['networkId']})"
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to create OpenstackNetwork {name}: {e}")
+        patch.status["phase"] = "Error"
+        _set_patch_condition(patch, "NetworkReady", "False", "Error", str(e)[:200])
+        raise kopf.TemporaryError(f"Creation failed: {e}", delay=60)
+
+
+@kopf.on.update("sunet.se", "v1alpha1", "openstacknetworks")
+def update_network_handler(
+    spec: dict[str, Any],
+    status: dict[str, Any],
+    patch: kopf.Patch,
+    name: str,
+    diff: kopf.Diff,
+    **_: Any,
+) -> None:
+    """Handle OpenstackNetwork updates.
+
+    Provider networks are largely immutable. For significant changes,
+    we need to delete and recreate.
+    """
+    logger.info(f"Updating OpenstackNetwork: {name}")
+
+    client = get_openstack_client()
+    registry = get_registry()
+    patch.status["phase"] = "Provisioning"
+
+    # Preserve existing status fields
+    for key in ("networkId", "subnets", "conditions"):
+        if key in status and key not in patch.status:
+            patch.status[key] = status[key]
+
+    try:
+        network_name = spec["name"]
+        network_id = status.get("networkId")
+
+        if not network_id:
+            # No network ID, treat as create
+            create_network_handler(spec=spec, patch=patch, name=name)
+            return
+
+        # Check what changed - for provider networks, most changes require recreate
+        changed_paths = {str(change[1]) for change in diff}
+        immutable_fields = {
+            "providerNetworkType",
+            "providerPhysicalNetwork",
+            "providerSegmentationId",
+            "external",
+            "shared",
+        }
+
+        needs_recreate = any(field in str(changed_paths) for field in immutable_fields)
+
+        if needs_recreate or "subnets" in str(changed_paths):
+            logger.info(f"Network {name} requires recreate due to property change")
+            # Delete old network and subnets
+            old_subnets = status.get("subnets", [])
+            old_subnet_ids = [s.get("subnetId") for s in old_subnets if s.get("subnetId")]
+            delete_provider_network(client, network_id, old_subnet_ids)
+            registry.unregister("provider_networks", network_name)
+
+            # Create new one
+            result = ensure_provider_network(client, spec)
+            subnet_ids = [s["subnetId"] for s in result.get("subnets", [])]
+            registry.register(
+                "provider_networks",
+                network_name,
+                result["networkId"],
+                cr_name=name,
+                extra={"subnets": subnet_ids},
+            )
+
+            patch.status["networkId"] = result["networkId"]
+            patch.status["subnets"] = result.get("subnets", [])
+            _set_patch_condition(patch, "NetworkReady", "True", "Recreated", "")
+        else:
+            _set_patch_condition(patch, "NetworkReady", "True", "Updated", "")
+
+        patch.status["phase"] = "Ready"
+        patch.status["lastSyncTime"] = now_iso()
+
+        logger.info(f"Successfully updated OpenstackNetwork: {name}")
+
+    except Exception as e:
+        logger.error(f"Failed to update OpenstackNetwork {name}: {e}")
+        patch.status["phase"] = "Error"
+        _set_patch_condition(patch, "NetworkReady", "False", "Error", str(e)[:200])
+        raise kopf.TemporaryError(f"Update failed: {e}", delay=60)
+
+
+@kopf.on.delete("sunet.se", "v1alpha1", "openstacknetworks")
+def delete_network_handler(
+    spec: dict[str, Any],
+    status: dict[str, Any],
+    name: str,
+    **_: Any,
+) -> None:
+    """Handle OpenstackNetwork deletion."""
+    logger.info(f"Deleting OpenstackNetwork: {name}")
+
+    client = get_openstack_client()
+    registry = get_registry()
+
+    network_name = spec["name"]
+    network_id = status.get("networkId")
+
+    if not network_id:
+        logger.warning(f"No networkId in status for {name}, nothing to delete")
+        return
+
+    try:
+        subnets = status.get("subnets", [])
+        subnet_ids = [s.get("subnetId") for s in subnets if s.get("subnetId")]
+
+        delete_provider_network(client, network_id, subnet_ids)
+        registry.unregister("provider_networks", network_name)
+
+        logger.info(f"Successfully deleted OpenstackNetwork: {name}")
+
+    except Exception as e:
+        logger.error(f"Failed to delete OpenstackNetwork {name}: {e}")
+        raise kopf.TemporaryError(f"Deletion failed: {e}", delay=60)
+
+
+@kopf.timer("sunet.se", "v1alpha1", "openstacknetworks", interval=300)
+def reconcile_network(
+    spec: dict[str, Any],
+    status: dict[str, Any],
+    patch: kopf.Patch,
+    name: str,
+    **_: Any,
+) -> None:
+    """Periodic reconciliation to detect and repair drift."""
+    if status.get("phase") != "Ready":
+        return
+
+    logger.debug(f"Reconciling OpenstackNetwork: {name}")
+
+    client = get_openstack_client()
+    network_name = spec["name"]
+
+    try:
+        info = get_provider_network_info(client, network_name)
+        if not info:
+            logger.warning(f"Network {network_name} not found, triggering recreate")
+            patch.status["phase"] = "Pending"
+            patch.status["networkId"] = None
+            patch.status["subnets"] = []
+            return
+
+        if info["network_id"] != status.get("networkId"):
+            logger.warning(f"Network ID mismatch for {network_name}")
+            patch.status["phase"] = "Pending"
+            patch.status["networkId"] = info["network_id"]
+            return
+
+        patch.status["lastSyncTime"] = now_iso()
+
+    except Exception as e:
+        logger.error(f"Reconciliation failed for {name}: {e}")

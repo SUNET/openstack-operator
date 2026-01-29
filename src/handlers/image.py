@@ -1,0 +1,308 @@
+"""Kopf handlers for OpenstackImage CRD."""
+
+import logging
+from typing import Any
+
+import kopf
+
+from openstack_client import OpenStackClient
+from resources.image import delete_image, ensure_image, get_image_status
+from resources.registry import ResourceRegistry
+from utils import now_iso
+
+logger = logging.getLogger(__name__)
+
+# Module-level registry and client (initialized lazily)
+_registry: ResourceRegistry | None = None
+_os_client: OpenStackClient | None = None
+
+
+def get_registry() -> ResourceRegistry:
+    """Get or create the resource registry."""
+    global _registry
+    if _registry is None:
+        _registry = ResourceRegistry()
+    return _registry
+
+
+def get_openstack_client() -> OpenStackClient:
+    """Get or create the OpenStack client."""
+    global _os_client
+    if _os_client is None:
+        _os_client = OpenStackClient()
+    return _os_client
+
+
+def _set_patch_condition(
+    patch: kopf.Patch,
+    condition_type: str,
+    condition_status: str,
+    reason: str = "",
+    message: str = "",
+) -> None:
+    """Set or update a condition in patch.status.conditions."""
+    if "conditions" not in patch.status:
+        patch.status["conditions"] = []
+
+    conditions: list[dict[str, str]] = patch.status["conditions"]
+
+    for condition in conditions:
+        if condition["type"] == condition_type:
+            if condition["status"] != condition_status:
+                condition["status"] = condition_status
+                condition["lastTransitionTime"] = now_iso()
+            condition["reason"] = reason
+            condition["message"] = message
+            return
+
+    conditions.append(
+        {
+            "type": condition_type,
+            "status": condition_status,
+            "reason": reason,
+            "message": message,
+            "lastTransitionTime": now_iso(),
+        }
+    )
+
+
+@kopf.on.create("sunet.se", "v1alpha1", "openstackimages")
+def create_image_handler(
+    spec: dict[str, Any],
+    patch: kopf.Patch,
+    name: str,
+    **_: Any,
+) -> None:
+    """Handle OpenstackImage creation."""
+    logger.info(f"Creating OpenstackImage: {name}")
+
+    patch.status["phase"] = "Provisioning"
+    patch.status["conditions"] = []
+
+    client = get_openstack_client()
+    registry = get_registry()
+
+    try:
+        image_name = spec["name"]
+
+        _set_patch_condition(patch, "ImageReady", "False", "Creating", "")
+
+        # Create image and start import (async operation)
+        image_id, upload_status = ensure_image(client, spec)
+
+        # Register in ConfigMap
+        registry.register("images", image_name, image_id, cr_name=name)
+
+        patch.status["imageId"] = image_id
+        patch.status["uploadStatus"] = upload_status
+
+        if upload_status == "active":
+            _set_patch_condition(patch, "ImageReady", "True", "Active", "")
+            patch.status["phase"] = "Ready"
+        else:
+            _set_patch_condition(
+                patch, "ImageReady", "False", "Importing",
+                f"Image import in progress (status: {upload_status})"
+            )
+            # Keep phase as Provisioning until import completes
+
+        patch.status["lastSyncTime"] = now_iso()
+
+        logger.info(f"Created OpenstackImage: {name} (id={image_id}, status={upload_status})")
+
+    except Exception as e:
+        logger.error(f"Failed to create OpenstackImage {name}: {e}")
+        patch.status["phase"] = "Error"
+        _set_patch_condition(patch, "ImageReady", "False", "Error", str(e)[:200])
+        raise kopf.TemporaryError(f"Creation failed: {e}", delay=60)
+
+
+@kopf.on.update("sunet.se", "v1alpha1", "openstackimages")
+def update_image_handler(
+    spec: dict[str, Any],
+    status: dict[str, Any],
+    patch: kopf.Patch,
+    name: str,
+    **_: Any,
+) -> None:
+    """Handle OpenstackImage updates.
+
+    Note: Only metadata (visibility, protected, tags, properties) can be updated.
+    Changing the content (URL) requires delete and recreate.
+    """
+    logger.info(f"Updating OpenstackImage: {name}")
+
+    client = get_openstack_client()
+    patch.status["phase"] = "Provisioning"
+
+    # Preserve existing status fields
+    for key in ("imageId", "uploadStatus", "checksum", "sizeBytes", "conditions"):
+        if key in status and key not in patch.status:
+            patch.status[key] = status[key]
+
+    try:
+        image_id = status.get("imageId")
+
+        if not image_id:
+            # No image ID, treat as create
+            create_image_handler(spec=spec, patch=patch, name=name)
+            return
+
+        # Update mutable properties
+        visibility = spec.get("visibility", "private")
+        protected = spec.get("protected", False)
+        tags = spec.get("tags", [])
+        properties = spec.get("properties", {})
+
+        client.update_image(
+            image_id,
+            visibility=visibility,
+            protected=protected,
+            tags=tags,
+            properties=properties,
+        )
+
+        _set_patch_condition(patch, "ImageReady", "True", "Updated", "")
+        patch.status["phase"] = "Ready"
+        patch.status["lastSyncTime"] = now_iso()
+
+        logger.info(f"Successfully updated OpenstackImage: {name}")
+
+    except Exception as e:
+        logger.error(f"Failed to update OpenstackImage {name}: {e}")
+        patch.status["phase"] = "Error"
+        _set_patch_condition(patch, "ImageReady", "False", "Error", str(e)[:200])
+        raise kopf.TemporaryError(f"Update failed: {e}", delay=60)
+
+
+@kopf.on.delete("sunet.se", "v1alpha1", "openstackimages")
+def delete_image_handler(
+    spec: dict[str, Any],
+    status: dict[str, Any],
+    name: str,
+    **_: Any,
+) -> None:
+    """Handle OpenstackImage deletion."""
+    logger.info(f"Deleting OpenstackImage: {name}")
+
+    client = get_openstack_client()
+    registry = get_registry()
+
+    image_name = spec["name"]
+    image_id = status.get("imageId")
+
+    if not image_id:
+        logger.warning(f"No imageId in status for {name}, nothing to delete")
+        return
+
+    try:
+        delete_image(client, image_id)
+        registry.unregister("images", image_name)
+        logger.info(f"Successfully deleted OpenstackImage: {name}")
+
+    except Exception as e:
+        logger.error(f"Failed to delete OpenstackImage {name}: {e}")
+        raise kopf.TemporaryError(f"Deletion failed: {e}", delay=60)
+
+
+@kopf.timer("sunet.se", "v1alpha1", "openstackimages", interval=30)
+def poll_image_status(
+    spec: dict[str, Any],
+    status: dict[str, Any],
+    patch: kopf.Patch,
+    name: str,
+    **_: Any,
+) -> None:
+    """Poll image upload status until import completes.
+
+    This timer runs every 30 seconds to check the import status.
+    Once the image reaches 'active' status, the phase changes to Ready.
+    """
+    # Only poll if we're still provisioning
+    current_phase = status.get("phase")
+    if current_phase not in ("Provisioning", "Pending"):
+        return
+
+    image_id = status.get("imageId")
+    if not image_id:
+        return
+
+    logger.debug(f"Polling image status for {name}")
+
+    client = get_openstack_client()
+
+    try:
+        image_status = get_image_status(client, image_id)
+
+        if image_status is None:
+            logger.warning(f"Image {name} not found, triggering recreate")
+            patch.status["phase"] = "Pending"
+            patch.status["imageId"] = None
+            patch.status["uploadStatus"] = None
+            return
+
+        patch.status["uploadStatus"] = image_status["status"]
+        if image_status.get("checksum"):
+            patch.status["checksum"] = image_status["checksum"]
+        if image_status.get("size"):
+            patch.status["sizeBytes"] = image_status["size"]
+
+        if image_status["status"] == "active":
+            logger.info(f"Image {name} import completed successfully")
+            _set_patch_condition(patch, "ImageReady", "True", "Active", "")
+            patch.status["phase"] = "Ready"
+        elif image_status["status"] in ("killed", "deleted"):
+            logger.error(f"Image {name} import failed with status: {image_status['status']}")
+            _set_patch_condition(
+                patch, "ImageReady", "False", "ImportFailed",
+                f"Image status: {image_status['status']}"
+            )
+            patch.status["phase"] = "Error"
+        else:
+            # Still importing (queued, saving, importing)
+            _set_patch_condition(
+                patch, "ImageReady", "False", "Importing",
+                f"Image status: {image_status['status']}"
+            )
+
+        patch.status["lastSyncTime"] = now_iso()
+
+    except Exception as e:
+        logger.error(f"Failed to poll image status for {name}: {e}")
+
+
+@kopf.timer("sunet.se", "v1alpha1", "openstackimages", interval=300)
+def reconcile_image(
+    spec: dict[str, Any],
+    status: dict[str, Any],
+    patch: kopf.Patch,
+    name: str,
+    **_: Any,
+) -> None:
+    """Periodic reconciliation to detect and repair drift."""
+    if status.get("phase") != "Ready":
+        return
+
+    logger.debug(f"Reconciling OpenstackImage: {name}")
+
+    client = get_openstack_client()
+    image_name = spec["name"]
+
+    try:
+        image = client.get_image(image_name)
+        if not image:
+            logger.warning(f"Image {image_name} not found, triggering recreate")
+            patch.status["phase"] = "Pending"
+            patch.status["imageId"] = None
+            return
+
+        if image.id != status.get("imageId"):
+            logger.warning(f"Image ID mismatch for {image_name}")
+            patch.status["phase"] = "Pending"
+            patch.status["imageId"] = image.id
+            return
+
+        patch.status["lastSyncTime"] = now_iso()
+
+    except Exception as e:
+        logger.error(f"Reconciliation failed for {name}: {e}")

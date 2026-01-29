@@ -1,4 +1,9 @@
-"""Garbage collection for orphaned OpenStack resources."""
+"""Garbage collection for orphaned OpenStack resources.
+
+This module handles cleanup of orphaned project-scoped resources.
+For cluster-scoped resources (domains, flavors, images, provider networks),
+see handlers/gc_cluster.py.
+"""
 
 import logging
 from typing import Any
@@ -6,6 +11,7 @@ from typing import Any
 from constants import MANAGED_BY_TAG
 from openstack_client import OpenStackClient
 from resources.federation import FederationManager
+from resources.registry import ResourceRegistry
 from utils import make_group_name
 
 logger = logging.getLogger(__name__)
@@ -16,18 +22,19 @@ def collect_garbage(
     managed_domain: str,
     expected_projects: set[str],
     federation_config: dict[str, str] | None = None,
+    registry: ResourceRegistry | None = None,
 ) -> dict[str, list[str]]:
     """Remove orphaned projects, groups, and federation mappings.
 
-    Only deletes projects that have the managed-by tag AND don't have
-    a corresponding OpenstackProject CR. This ensures we never delete
-    resources created outside the operator.
+    Uses both tag-based detection (legacy) and registry-based detection.
+    Resources tracked in the registry are preferred for identifying orphans.
 
     Args:
         client: OpenStack client
         managed_domain: Domain name to scan for orphans (e.g., 'sso-users')
         expected_projects: Set of project names that should exist (from CRs)
         federation_config: Optional dict with idp_name, idp_remote_id, sso_domain
+        registry: Optional resource registry for ConfigMap-based tracking
 
     Returns:
         Dict with 'deleted_projects', 'deleted_groups', 'deleted_mappings' lists
@@ -43,42 +50,79 @@ def collect_garbage(
         logger.warning(f"Domain {managed_domain} not found, skipping GC")
         return result
 
-    # Get only operator-managed projects (those with our tag)
-    projects = client.list_projects_with_tag(domain.id, MANAGED_BY_TAG)
-    logger.debug(f"Found {len(projects)} operator-managed projects in {managed_domain}")
-
     orphaned_projects: list[str] = []
 
-    for project in projects:
-        if project.name not in expected_projects:
+    # Method 1: Registry-based orphan detection (preferred)
+    if registry:
+        orphans = registry.get_orphans("projects", expected_projects)
+        for orphan in orphans:
+            project_name = orphan["name"]
             logger.info(
-                f"Found orphaned project {project.name} in domain {managed_domain}"
+                f"Found orphaned project (registry): {project_name} in domain {managed_domain}"
             )
-            orphaned_projects.append(project.name)
+            orphaned_projects.append(project_name)
 
-            # Find and delete associated group
-            group_name = make_group_name(project.name)
-            group = client.get_group(group_name, managed_domain)
-            if group:
+            # Delete associated group
+            group_orphans = registry.get_by_cr("groups", orphan.get("cr_name", ""))
+            for group_orphan in group_orphans:
                 try:
-                    client.delete_group(group.id)
-                    result["deleted_groups"].append(group_name)
-                    logger.info(f"Deleted orphaned group {group_name}")
+                    client.delete_group(group_orphan["id"])
+                    registry.unregister("groups", group_orphan["name"])
+                    result["deleted_groups"].append(group_orphan["name"])
+                    logger.info(f"Deleted orphaned group {group_orphan['name']}")
                 except Exception as e:
-                    logger.error(f"Failed to delete group {group_name}: {e}")
+                    logger.error(f"Failed to delete group {group_orphan['name']}: {e}")
 
             # Delete the project
             try:
-                client.delete_project(project.id)
-                result["deleted_projects"].append(project.name)
-                logger.info(f"Deleted orphaned project {project.name}")
+                client.delete_project(orphan["id"])
+                registry.unregister("projects", project_name)
+                result["deleted_projects"].append(project_name)
+                logger.info(f"Deleted orphaned project {project_name}")
             except Exception as e:
-                logger.error(f"Failed to delete project {project.name}: {e}")
+                logger.error(f"Failed to delete project {project_name}: {e}")
+
+    # Method 2: Tag-based orphan detection (legacy/fallback)
+    # This catches projects that were created before registry was introduced
+    projects = client.list_projects_with_tag(domain.id, MANAGED_BY_TAG)
+    logger.debug(f"Found {len(projects)} tagged projects in {managed_domain}")
+
+    for project in projects:
+        # Skip if already handled via registry
+        if project.name in orphaned_projects:
+            continue
+        # Skip if project should exist
+        if project.name in expected_projects:
+            continue
+
+        logger.info(
+            f"Found orphaned project (tag): {project.name} in domain {managed_domain}"
+        )
+        orphaned_projects.append(project.name)
+
+        # Find and delete associated group
+        group_name = make_group_name(project.name)
+        group = client.get_group(group_name, managed_domain)
+        if group:
+            try:
+                client.delete_group(group.id)
+                result["deleted_groups"].append(group_name)
+                logger.info(f"Deleted orphaned group {group_name}")
+            except Exception as e:
+                logger.error(f"Failed to delete group {group_name}: {e}")
+
+        # Delete the project
+        try:
+            client.delete_project(project.id)
+            result["deleted_projects"].append(project.name)
+            logger.info(f"Deleted orphaned project {project.name}")
+        except Exception as e:
+            logger.error(f"Failed to delete project {project.name}: {e}")
 
     # Clean up federation mappings for orphaned projects
     if federation_config and orphaned_projects:
         _cleanup_federation_mappings(
-            client, federation_config, orphaned_projects, result
+            client, federation_config, orphaned_projects, result, registry
         )
 
     return result
@@ -89,6 +133,7 @@ def _cleanup_federation_mappings(
     federation_config: dict[str, str],
     orphaned_projects: list[str],
     result: dict[str, list[str]],
+    registry: ResourceRegistry | None = None,
 ) -> None:
     """Remove federation mapping rules for orphaned projects."""
     try:
@@ -102,6 +147,8 @@ def _cleanup_federation_mappings(
         for project_name in orphaned_projects:
             try:
                 manager.remove_project_mapping(project_name)
+                if registry:
+                    registry.unregister("federation_mappings", project_name)
                 result["deleted_mappings"].append(project_name)
                 logger.info(f"Removed federation mapping for orphaned project {project_name}")
             except Exception as e:

@@ -161,6 +161,89 @@ class OpenstackProjectSpec(TypedDict):
 
 
 # =============================================================================
+# TypedDicts for new CRDs (Domain, Flavor, Image, Network)
+# =============================================================================
+
+
+class OpenstackDomainSpec(TypedDict):
+    """Full OpenstackDomain CRD spec."""
+
+    name: str
+    description: NotRequired[str]
+    enabled: NotRequired[bool]
+
+
+class OpenstackFlavorSpec(TypedDict):
+    """Full OpenstackFlavor CRD spec."""
+
+    name: str
+    description: NotRequired[str]
+    vcpus: int
+    ram: int
+    disk: NotRequired[int]
+    ephemeral: NotRequired[int]
+    swap: NotRequired[int]
+    isPublic: NotRequired[bool]
+    extraSpecs: NotRequired[dict[str, str]]
+
+
+class ImageSourceSpec(TypedDict):
+    """Image source specification from CRD."""
+
+    url: str
+
+
+class ImageContentSpec(TypedDict):
+    """Image content specification from CRD."""
+
+    diskFormat: Literal["raw", "qcow2", "vhd", "vhdx", "vmdk", "vdi", "iso", "aki", "ari", "ami"]
+    containerFormat: NotRequired[Literal["bare", "ovf", "ova", "aki", "ari", "ami", "docker"]]
+    source: ImageSourceSpec
+
+
+class OpenstackImageSpec(TypedDict):
+    """Full OpenstackImage CRD spec."""
+
+    name: str
+    visibility: NotRequired[Literal["public", "private", "shared", "community"]]
+    protected: NotRequired[bool]
+    tags: NotRequired[list[str]]
+    properties: NotRequired[dict[str, str]]
+    content: ImageContentSpec
+
+
+class AllocationPoolSpec(TypedDict):
+    """Allocation pool specification for subnets."""
+
+    start: str
+    end: str
+
+
+class ProviderSubnetSpec(TypedDict):
+    """Subnet specification for provider networks."""
+
+    name: str
+    cidr: str
+    gatewayIp: NotRequired[str]
+    enableDhcp: NotRequired[bool]
+    dnsNameservers: NotRequired[list[str]]
+    allocationPools: NotRequired[list[AllocationPoolSpec]]
+
+
+class OpenstackNetworkSpec(TypedDict):
+    """Full OpenstackNetwork CRD spec (provider networks)."""
+
+    name: str
+    description: NotRequired[str]
+    external: NotRequired[bool]
+    shared: NotRequired[bool]
+    providerNetworkType: NotRequired[Literal["flat", "vlan", "vxlan", "gre", "geneve"]]
+    providerPhysicalNetwork: NotRequired[str]
+    providerSegmentationId: NotRequired[int]
+    subnets: NotRequired[list[ProviderSubnetSpec]]
+
+
+# =============================================================================
 # Dataclasses for internal state and status
 # =============================================================================
 
@@ -351,6 +434,133 @@ class FederationConfig:
             idp_remote_id=data.get("idp-remote-id", ""),
             sso_domain=data.get("sso-domain", ""),
         )
+
+
+# =============================================================================
+# Status dataclasses for new CRDs
+# =============================================================================
+
+
+@dataclass
+class DomainStatus:
+    """Status of an OpenstackDomain resource."""
+
+    phase: Phase = Phase.PENDING
+    domain_id: str | None = None
+    conditions: list[Condition] = field(default_factory=list)
+    last_sync_time: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        """Convert to dict for Kubernetes status."""
+        result: dict[str, object] = {"phase": self.phase.value}
+        if self.domain_id:
+            result["domainId"] = self.domain_id
+        if self.conditions:
+            result["conditions"] = [c.to_dict() for c in self.conditions]
+        if self.last_sync_time:
+            result["lastSyncTime"] = self.last_sync_time
+        return result
+
+
+@dataclass
+class FlavorStatus:
+    """Status of an OpenstackFlavor resource."""
+
+    phase: Phase = Phase.PENDING
+    flavor_id: str | None = None
+    conditions: list[Condition] = field(default_factory=list)
+    last_sync_time: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        """Convert to dict for Kubernetes status."""
+        result: dict[str, object] = {"phase": self.phase.value}
+        if self.flavor_id:
+            result["flavorId"] = self.flavor_id
+        if self.conditions:
+            result["conditions"] = [c.to_dict() for c in self.conditions]
+        if self.last_sync_time:
+            result["lastSyncTime"] = self.last_sync_time
+        return result
+
+
+class ImageUploadStatus(Enum):
+    """Glance image status."""
+
+    QUEUED = "queued"
+    SAVING = "saving"
+    ACTIVE = "active"
+    KILLED = "killed"
+    DELETED = "deleted"
+    PENDING_DELETE = "pending_delete"
+    DEACTIVATED = "deactivated"
+    UPLOADING = "uploading"
+    IMPORTING = "importing"
+
+
+@dataclass
+class ImageStatus:
+    """Status of an OpenstackImage resource."""
+
+    phase: Phase = Phase.PENDING
+    image_id: str | None = None
+    upload_status: str | None = None
+    checksum: str | None = None
+    size_bytes: int | None = None
+    conditions: list[Condition] = field(default_factory=list)
+    last_sync_time: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        """Convert to dict for Kubernetes status."""
+        result: dict[str, object] = {"phase": self.phase.value}
+        if self.image_id:
+            result["imageId"] = self.image_id
+        if self.upload_status:
+            result["uploadStatus"] = self.upload_status
+        if self.checksum:
+            result["checksum"] = self.checksum
+        if self.size_bytes is not None:
+            result["sizeBytes"] = self.size_bytes
+        if self.conditions:
+            result["conditions"] = [c.to_dict() for c in self.conditions]
+        if self.last_sync_time:
+            result["lastSyncTime"] = self.last_sync_time
+        return result
+
+
+@dataclass(frozen=True)
+class ProviderSubnetStatus:
+    """Status of a subnet in a provider network."""
+
+    name: str
+    subnet_id: str
+
+    def to_dict(self) -> dict[str, str]:
+        """Convert to dict for Kubernetes status."""
+        return {"name": self.name, "subnetId": self.subnet_id}
+
+
+@dataclass
+class ProviderNetworkStatus:
+    """Status of an OpenstackNetwork resource."""
+
+    phase: Phase = Phase.PENDING
+    network_id: str | None = None
+    subnets: list[ProviderSubnetStatus] = field(default_factory=list)
+    conditions: list[Condition] = field(default_factory=list)
+    last_sync_time: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        """Convert to dict for Kubernetes status."""
+        result: dict[str, object] = {"phase": self.phase.value}
+        if self.network_id:
+            result["networkId"] = self.network_id
+        if self.subnets:
+            result["subnets"] = [s.to_dict() for s in self.subnets]
+        if self.conditions:
+            result["conditions"] = [c.to_dict() for c in self.conditions]
+        if self.last_sync_time:
+            result["lastSyncTime"] = self.last_sync_time
+        return result
 
 
 # =============================================================================

@@ -10,6 +10,10 @@ resources:
   - rbac.yaml
   - deployment.yaml
   - ../../crds/openstackproject_crd.yaml
+  - ../../crds/openstackdomain_crd.yaml
+  - ../../crds/openstackflavor_crd.yaml
+  - ../../crds/openstackimage_crd.yaml
+  - ../../crds/openstacknetwork_crd.yaml
 
 commonLabels:
   app.kubernetes.io/part-of: openstack-operator

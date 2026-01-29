@@ -6,12 +6,19 @@ metadata:
   labels:
     app.kubernetes.io/name: openstack-operator
 rules:
-  # OpenstackProject CRD access
+  # OpenstackProject CRD access (namespaced)
   - apiGroups: ["sunet.se"]
     resources: ["openstackprojects"]
     verbs: ["get", "list", "watch", "patch", "update"]
   - apiGroups: ["sunet.se"]
     resources: ["openstackprojects/status"]
+    verbs: ["get", "patch", "update"]
+  # Cluster-scoped CRD access (domains, flavors, images, networks)
+  - apiGroups: ["sunet.se"]
+    resources: ["openstackdomains", "openstackflavors", "openstackimages", "openstacknetworks"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: ["sunet.se"]
+    resources: ["openstackdomains/status", "openstackflavors/status", "openstackimages/status", "openstacknetworks/status"]
     verbs: ["get", "patch", "update"]
   # Required for Kopf to discover CRDs
   - apiGroups: ["apiextensions.k8s.io"]
@@ -21,10 +28,10 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
-  # ConfigMap access for federation config
+  # ConfigMap access for federation config and resource registry
   - apiGroups: [""]
     resources: ["configmaps"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
   # Coordination for leader election (if running multiple replicas)
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]

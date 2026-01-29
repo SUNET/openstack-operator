@@ -679,3 +679,268 @@ class OpenStackClient:
             id=protocol_id,
             mapping_id=mapping_id,
         )
+
+    # -------------------------------------------------------------------------
+    # Domain management operations (create/update/delete)
+    # -------------------------------------------------------------------------
+
+    @retry_on_error()
+    def create_domain(
+        self,
+        name: str,
+        description: str = "",
+        enabled: bool = True,
+    ) -> Domain:
+        """Create a new domain."""
+        logger.info("Creating domain: %s", name)
+        return self.conn.identity.create_domain(
+            name=name,
+            description=description,
+            is_enabled=enabled,
+        )
+
+    @retry_on_error()
+    def update_domain(
+        self,
+        domain_id: str,
+        description: str | None = None,
+        enabled: bool | None = None,
+    ) -> Domain:
+        """Update an existing domain."""
+        updates: dict[str, object] = {}
+        if description is not None:
+            updates["description"] = description
+        if enabled is not None:
+            updates["is_enabled"] = enabled
+
+        if updates:
+            logger.info("Updating domain %s: %s", domain_id, updates)
+            return self.conn.identity.update_domain(domain_id, **updates)
+        return self.conn.identity.get_domain(domain_id)
+
+    @retry_on_error()
+    def delete_domain(self, domain_id: str) -> None:
+        """Delete a domain. Domain must be disabled first."""
+        logger.info("Deleting domain: %s", domain_id)
+        try:
+            # Ensure domain is disabled before deletion
+            self.conn.identity.update_domain(domain_id, is_enabled=False)
+            self.conn.identity.delete_domain(domain_id)
+        except ResourceNotFound:
+            logger.debug("Domain %s already deleted", domain_id)
+
+    # -------------------------------------------------------------------------
+    # Flavor operations
+    # -------------------------------------------------------------------------
+
+    @retry_on_error()
+    def get_flavor(self, name: str) -> object | None:
+        """Get a flavor by name."""
+        return self.conn.compute.find_flavor(name)
+
+    @retry_on_error()
+    def create_flavor(
+        self,
+        name: str,
+        vcpus: int,
+        ram: int,
+        disk: int = 0,
+        ephemeral: int = 0,
+        swap: int = 0,
+        is_public: bool = True,
+        description: str = "",
+    ) -> object:
+        """Create a new flavor."""
+        logger.info("Creating flavor: %s (vcpus=%d, ram=%d, disk=%d)", name, vcpus, ram, disk)
+        return self.conn.compute.create_flavor(
+            name=name,
+            vcpus=vcpus,
+            ram=ram,
+            disk=disk,
+            ephemeral=ephemeral,
+            swap=swap,
+            is_public=is_public,
+            description=description,
+        )
+
+    @retry_on_error()
+    def set_flavor_extra_specs(self, flavor_id: str, extra_specs: dict[str, str]) -> None:
+        """Set extra specs on a flavor."""
+        if not extra_specs:
+            return
+        logger.info("Setting extra specs on flavor %s: %s", flavor_id, extra_specs)
+        self.conn.compute.create_flavor_extra_specs(flavor_id, extra_specs)
+
+    @retry_on_error()
+    def delete_flavor(self, flavor_id: str) -> None:
+        """Delete a flavor."""
+        logger.info("Deleting flavor: %s", flavor_id)
+        try:
+            self.conn.compute.delete_flavor(flavor_id)
+        except ResourceNotFound:
+            logger.debug("Flavor %s already deleted", flavor_id)
+
+    # -------------------------------------------------------------------------
+    # Image operations
+    # -------------------------------------------------------------------------
+
+    @retry_on_error()
+    def get_image(self, name: str) -> object | None:
+        """Get an image by name."""
+        return self.conn.image.find_image(name)
+
+    @retry_on_error()
+    def create_image(
+        self,
+        name: str,
+        disk_format: str,
+        container_format: str = "bare",
+        visibility: str = "private",
+        protected: bool = False,
+        tags: list[str] | None = None,
+        properties: dict[str, str] | None = None,
+    ) -> object:
+        """Create a new image (metadata only, no data uploaded yet)."""
+        logger.info("Creating image: %s (disk_format=%s, visibility=%s)", name, disk_format, visibility)
+        kwargs: dict[str, object] = {
+            "name": name,
+            "disk_format": disk_format,
+            "container_format": container_format,
+            "visibility": visibility,
+            "is_protected": protected,
+        }
+        if tags:
+            kwargs["tags"] = tags
+        if properties:
+            # Properties are passed directly to the image
+            kwargs.update(properties)
+
+        return self.conn.image.create_image(**kwargs)
+
+    @retry_on_error()
+    def import_image_from_url(self, image_id: str, url: str) -> None:
+        """Import image data from a URL using Glance web-download.
+
+        This initiates an async download in Glance. The image status
+        should be polled to check completion.
+        """
+        logger.info("Importing image %s from URL: %s", image_id, url)
+        self.conn.image.import_image(
+            image_id,
+            method="web-download",
+            uri=url,
+        )
+
+    @retry_on_error()
+    def get_image_by_id(self, image_id: str) -> object | None:
+        """Get an image by ID."""
+        try:
+            return self.conn.image.get_image(image_id)
+        except ResourceNotFound:
+            return None
+
+    @retry_on_error()
+    def update_image(
+        self,
+        image_id: str,
+        visibility: str | None = None,
+        protected: bool | None = None,
+        tags: list[str] | None = None,
+        properties: dict[str, str] | None = None,
+    ) -> object:
+        """Update an existing image."""
+        kwargs: dict[str, object] = {}
+        if visibility is not None:
+            kwargs["visibility"] = visibility
+        if protected is not None:
+            kwargs["is_protected"] = protected
+        if tags is not None:
+            kwargs["tags"] = tags
+        if properties:
+            kwargs.update(properties)
+
+        if kwargs:
+            logger.info("Updating image %s: %s", image_id, kwargs)
+            return self.conn.image.update_image(image_id, **kwargs)
+        return self.conn.image.get_image(image_id)
+
+    @retry_on_error()
+    def delete_image(self, image_id: str) -> None:
+        """Delete an image."""
+        logger.info("Deleting image: %s", image_id)
+        try:
+            # Unprotect image first if needed
+            image = self.conn.image.get_image(image_id)
+            if image and getattr(image, "is_protected", False):
+                self.conn.image.update_image(image_id, is_protected=False)
+            self.conn.image.delete_image(image_id)
+        except ResourceNotFound:
+            logger.debug("Image %s already deleted", image_id)
+
+    # -------------------------------------------------------------------------
+    # Provider network operations (admin)
+    # -------------------------------------------------------------------------
+
+    @retry_on_error()
+    def get_network_by_name(self, name: str) -> Network | None:
+        """Get a network by name (any project, for provider networks)."""
+        networks = list(self.conn.network.networks(name=name))
+        return networks[0] if networks else None
+
+    @retry_on_error()
+    def create_provider_network(
+        self,
+        name: str,
+        network_type: str,
+        physical_network: str | None = None,
+        segmentation_id: int | None = None,
+        external: bool = False,
+        shared: bool = False,
+        description: str = "",
+    ) -> Network:
+        """Create a provider network (requires admin)."""
+        logger.info(
+            "Creating provider network: %s (type=%s, physical=%s, external=%s)",
+            name, network_type, physical_network, external
+        )
+        kwargs: dict[str, object] = {
+            "name": name,
+            "description": description,
+            "is_router_external": external,
+            "is_shared": shared,
+            "provider_network_type": network_type,
+        }
+        if physical_network:
+            kwargs["provider_physical_network"] = physical_network
+        if segmentation_id:
+            kwargs["provider_segmentation_id"] = segmentation_id
+
+        return self.conn.network.create_network(**kwargs)
+
+    @retry_on_error()
+    def create_subnet_with_pools(
+        self,
+        name: str,
+        network_id: str,
+        cidr: str,
+        gateway_ip: str | None = None,
+        enable_dhcp: bool = True,
+        dns_nameservers: list[str] | None = None,
+        allocation_pools: list[dict[str, str]] | None = None,
+    ) -> Subnet:
+        """Create a subnet with allocation pools."""
+        logger.info("Creating subnet: %s with CIDR %s (gateway=%s)", name, cidr, gateway_ip)
+        kwargs: dict[str, object] = {
+            "name": name,
+            "network_id": network_id,
+            "cidr": cidr,
+            "ip_version": 4,
+            "is_dhcp_enabled": enable_dhcp,
+            "dns_nameservers": dns_nameservers or [],
+        }
+        if gateway_ip:
+            kwargs["gateway_ip"] = gateway_ip
+        if allocation_pools:
+            kwargs["allocation_pools"] = allocation_pools
+
+        return self.conn.network.create_subnet(**kwargs)
