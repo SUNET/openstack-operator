@@ -42,6 +42,12 @@ OPENSTACK_API_RETRIES = Counter(
     ["service", "operation"],
 )
 
+RATE_LIMIT_WAIT_SECONDS = Histogram(
+    "openstack_operator_rate_limit_wait_seconds",
+    "Time spent waiting for rate limit slot",
+    buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5),
+)
+
 # Resource state metrics
 MANAGED_RESOURCES = Gauge(
     "openstack_operator_managed_resources",

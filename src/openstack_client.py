@@ -27,6 +27,7 @@ from metrics import (
     OPENSTACK_API_DURATION,
     OPENSTACK_API_RETRIES,
 )
+from ratelimit import get_rate_limiter
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +69,7 @@ def retry_on_error(
     backoff: float = 2.0,
     exceptions: tuple[type[Exception], ...] = (HttpException,),
 ) -> Callable[[Callable[P, T]], Callable[P, T]]:
-    """Decorator to retry operations on transient errors with metrics."""
+    """Decorator to retry operations on transient errors with metrics and rate limiting."""
 
     def decorator(func: Callable[P, T]) -> Callable[P, T]:
         @wraps(func)
@@ -77,50 +78,56 @@ def retry_on_error(
             current_delay = delay
             service = _get_service_from_func_name(func.__name__)
             operation = func.__name__
+            rate_limiter = get_rate_limiter()
 
             for attempt in range(max_retries + 1):
-                start_time = time.monotonic()
-                try:
-                    result = func(*args, **kwargs)
-                    # Record successful API call
-                    duration = time.monotonic() - start_time
-                    OPENSTACK_API_CALLS.labels(
-                        service=service, operation=operation, status="success"
-                    ).inc()
-                    OPENSTACK_API_DURATION.labels(
-                        service=service, operation=operation
-                    ).observe(duration)
-                    return result
-                except exceptions as e:
-                    last_exception = e
-                    duration = time.monotonic() - start_time
-                    OPENSTACK_API_DURATION.labels(
-                        service=service, operation=operation
-                    ).observe(duration)
-
-                    if attempt < max_retries:
-                        OPENSTACK_API_RETRIES.labels(
-                            service=service, operation=operation
-                        ).inc()
-                        logger.warning(
-                            "Attempt %d/%d failed for %s: %s. Retrying in %.1fs...",
-                            attempt + 1,
-                            max_retries + 1,
-                            func.__name__,
-                            e,
-                            current_delay,
-                        )
-                        time.sleep(current_delay)
-                        current_delay *= backoff
-                    else:
+                # Acquire rate limit slot before making API call
+                with rate_limiter.acquire():
+                    start_time = time.monotonic()
+                    try:
+                        result = func(*args, **kwargs)
+                        # Record successful API call
+                        duration = time.monotonic() - start_time
                         OPENSTACK_API_CALLS.labels(
-                            service=service, operation=operation, status="error"
+                            service=service, operation=operation, status="success"
                         ).inc()
-                        logger.error(
-                            "All %d attempts failed for %s",
-                            max_retries + 1,
-                            func.__name__,
-                        )
+                        OPENSTACK_API_DURATION.labels(
+                            service=service, operation=operation
+                        ).observe(duration)
+                        return result
+                    except exceptions as e:
+                        last_exception = e
+                        duration = time.monotonic() - start_time
+                        OPENSTACK_API_DURATION.labels(
+                            service=service, operation=operation
+                        ).observe(duration)
+
+                        if attempt < max_retries:
+                            OPENSTACK_API_RETRIES.labels(
+                                service=service, operation=operation
+                            ).inc()
+                            logger.warning(
+                                "Attempt %d/%d failed for %s: %s. Retrying in %.1fs...",
+                                attempt + 1,
+                                max_retries + 1,
+                                func.__name__,
+                                e,
+                                current_delay,
+                            )
+                        else:
+                            OPENSTACK_API_CALLS.labels(
+                                service=service, operation=operation, status="error"
+                            ).inc()
+                            logger.error(
+                                "All %d attempts failed for %s",
+                                max_retries + 1,
+                                func.__name__,
+                            )
+
+                # Sleep for retry outside the rate limiter context
+                if attempt < max_retries and last_exception is not None:
+                    time.sleep(current_delay)
+                    current_delay *= backoff
 
             if last_exception is not None:
                 raise OpenStackAPIError(
