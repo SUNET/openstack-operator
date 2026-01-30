@@ -1,6 +1,6 @@
 # Pin to specific version for reproducible builds
 # Update periodically for security patches
-FROM python:3.13.2-slim-trixie
+FROM python:3.12.12-slim-trixie
 
 LABEL org.opencontainers.image.source="https://github.com/SUNET/openstack-operator"
 LABEL org.opencontainers.image.description="Kopf-based Kubernetes operator for managing OpenStack projects"

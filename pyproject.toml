@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Kopf-based Kubernetes operator for managing OpenStack projects"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 authors = [
     { name = "Micke Nordin", email = "kano@sunet.se" },
 ]
@@ -18,7 +18,7 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
     "kopf>=1.37.0",
@@ -44,7 +44,7 @@ openstack-operator = "src.handlers:main"
 packages = ["src"]
 
 [tool.ruff]
-target-version = "py313"
+target-version = "py312"
 line-length = 100
 
 [tool.ruff.lint]
@@ -62,7 +62,7 @@ ignore = [
 ]
 
 [tool.mypy]
-python_version = "3.13"
+python_version = "3.12"
 warn_return_any = true
 warn_unused_ignores = true
 disallow_untyped_defs = true
