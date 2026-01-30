@@ -223,6 +223,15 @@ def create_project(
                         fed_config["sso_domain"],
                     )
                     manager.add_project_mapping(project_name, users)
+                    # Register federation mapping for GC tracking
+                    registry = get_registry()
+                    registry.register(
+                        "federation_mappings",
+                        project_name,
+                        manager.mapping_name,
+                        name,  # CR name
+                        {"idp_name": fed_config["idp_name"]},
+                    )
                 _set_patch_condition(patch, "FederationReady", "True", "Configured", "")
 
         patch.status["phase"] = "Ready"
@@ -337,11 +346,21 @@ def update_project(
                     fed_config["idp_remote_id"],
                     fed_config["sso_domain"],
                 )
+                registry = get_registry()
                 if users:
                     manager.add_project_mapping(project_name, users)
+                    # Register federation mapping for GC tracking
+                    registry.register(
+                        "federation_mappings",
+                        project_name,
+                        manager.mapping_name,
+                        name,  # CR name
+                        {"idp_name": fed_config["idp_name"]},
+                    )
                 else:
                     # Remove mapping when no users remain
                     manager.remove_project_mapping(project_name)
+                    registry.unregister("federation_mappings", project_name)
                 _set_patch_condition(patch, "FederationReady", "True", "Updated", "")
 
         patch.status["phase"] = "Ready"
@@ -392,6 +411,9 @@ def delete_project_handler(
                     fed_config["sso_domain"],
                 )
                 manager.remove_project_mapping(project_name)
+                # Unregister from GC tracking
+                registry = get_registry()
+                registry.unregister("federation_mappings", project_name)
 
         # 2. Delete security groups
         sg_statuses = status.get("securityGroups", [])
@@ -459,6 +481,32 @@ def reconcile_project(
             patch.status["projectId"] = info["project_id"]
             patch.status["groupId"] = info["group_id"]
             return
+
+        # Verify and repair federation resources if configured
+        federation_ref = spec.get("federationRef")
+        role_bindings = spec.get("roleBindings", [])
+        if federation_ref and role_bindings:
+            fed_config = get_federation_config(namespace, federation_ref)
+            if fed_config and fed_config["idp_name"]:
+                users = get_users_from_role_bindings(role_bindings)
+                if users:
+                    manager = FederationManager(
+                        client,
+                        fed_config["idp_name"],
+                        fed_config["idp_remote_id"],
+                        fed_config["sso_domain"],
+                    )
+                    # This will create IdP/mapping/protocol if missing
+                    manager.add_project_mapping(project_name, users)
+                    # Ensure federation mapping is registered for GC tracking
+                    registry = get_registry()
+                    registry.register(
+                        "federation_mappings",
+                        project_name,
+                        manager.mapping_name,
+                        name,  # CR name
+                        {"idp_name": fed_config["idp_name"]},
+                    )
 
         patch.status["lastSyncTime"] = now_iso()
 
