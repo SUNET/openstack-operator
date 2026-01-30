@@ -1,7 +1,14 @@
-# OpenStack Project Operator
+# OpenStack Operator
 
-A Kopf-based Kubernetes operator for declaratively managing OpenStack projects, including:
+A Kopf-based Kubernetes operator for declaratively managing OpenStack resources, including:
 
+**Cluster-scoped resources:**
+- Domains (Keystone)
+- Flavors (Nova)
+- Images (Glance) with web-download support
+- Provider networks (Neutron)
+
+**Namespace-scoped resources:**
 - Projects and user groups
 - Quotas (compute, storage, network)
 - Networks, subnets, and routers
@@ -9,7 +16,144 @@ A Kopf-based Kubernetes operator for declaratively managing OpenStack projects, 
 - Role bindings
 - Federation mappings for SSO access
 
-## CRD: OpenstackProject
+## CRDs
+
+### OpenstackDomain (cluster-scoped)
+
+Manages Keystone domains for organizing users and projects.
+
+```yaml
+apiVersion: sunet.se/v1alpha1
+kind: OpenstackDomain
+metadata:
+  name: sso-users
+spec:
+  name: sso-users
+  description: "Domain for SSO-authenticated users"
+  enabled: true
+```
+
+**Status:**
+```yaml
+status:
+  phase: Ready
+  domainId: "abc123..."
+  conditions:
+    - type: Ready
+      status: "True"
+```
+
+### OpenstackFlavor (cluster-scoped)
+
+Manages Nova flavors for VM sizing.
+
+```yaml
+apiVersion: sunet.se/v1alpha1
+kind: OpenstackFlavor
+metadata:
+  name: b2.c2r4
+spec:
+  name: b2.c2r4
+  vcpus: 2
+  ram: 4096      # MB
+  disk: 0        # GB (0 = boot from volume)
+  ephemeral: 0   # GB
+  swap: 0        # MB
+  isPublic: true
+  extraSpecs:
+    "hw:cpu_policy": "shared"
+```
+
+**Status:**
+```yaml
+status:
+  phase: Ready
+  flavorId: "def456..."
+  conditions:
+    - type: Ready
+      status: "True"
+```
+
+### OpenstackImage (cluster-scoped)
+
+Manages Glance images with support for web-download import.
+
+```yaml
+apiVersion: sunet.se/v1alpha1
+kind: OpenstackImage
+metadata:
+  name: debian-13
+spec:
+  name: "Debian 13 (Trixie)"
+  visibility: public
+  protected: false
+  tags:
+    - debian
+    - trixie
+  properties:
+    os_distro: debian
+    os_version: "13"
+  content:
+    diskFormat: qcow2
+    containerFormat: bare
+    source:
+      url: https://cloud.debian.org/images/cloud/trixie/daily/latest/debian-13-generic-amd64-daily.qcow2
+```
+
+**Status:**
+```yaml
+status:
+  phase: Ready
+  imageId: "ghi789..."
+  uploadStatus: active
+  checksum: "abc123..."
+  sizeBytes: 1234567890
+  conditions:
+    - type: Ready
+      status: "True"
+```
+
+### OpenstackNetwork (cluster-scoped)
+
+Manages provider networks (external/flat networks).
+
+```yaml
+apiVersion: sunet.se/v1alpha1
+kind: OpenstackNetwork
+metadata:
+  name: external
+spec:
+  name: external
+  external: true
+  shared: false
+  providerNetworkType: flat
+  providerPhysicalNetwork: external
+  subnets:
+    - name: external-subnet
+      cidr: 192.168.1.0/24
+      gateway: 192.168.1.1
+      enableDhcp: false
+      allocationPools:
+        - start: 192.168.1.100
+          end: 192.168.1.200
+```
+
+**Status:**
+```yaml
+status:
+  phase: Ready
+  networkId: "jkl012..."
+  subnets:
+    - name: external-subnet
+      subnetId: "mno345..."
+  conditions:
+    - type: Ready
+      status: "True"
+```
+
+### OpenstackProject (namespace-scoped)
+
+Manages projects with full resource provisioning.
 
 ```yaml
 apiVersion: sunet.se/v1alpha1
@@ -19,7 +163,7 @@ metadata:
 spec:
   name: "my-project.example.com"
   description: "My OpenStack project"
-  domain: "federated-users"
+  domain: "sso-users"
   enabled: true
 
   quotas:
@@ -55,10 +199,31 @@ spec:
       users:
         - user1@example.com
         - user2@example.com
-      userDomain: federated-users
+      userDomain: sso-users
 
   federationRef:
     configMapName: federation-config
+```
+
+**Status:**
+```yaml
+status:
+  phase: Ready
+  projectId: "abc123..."
+  groupId: "def456..."
+  networks:
+    - name: internal
+      networkId: "..."
+      subnetId: "..."
+      routerId: "..."
+  securityGroups:
+    - name: allow-ssh
+      id: "..."
+  conditions:
+    - type: ProjectReady
+      status: "True"
+    - type: NetworksReady
+      status: "True"
 ```
 
 ## Building
@@ -75,8 +240,8 @@ docker build -t docker.sunet.se/platform/openstack-operator:latest .
 The operator requires:
 
 1. **OpenStack credentials** - A Secret with `clouds.yaml` containing admin credentials
-2. **CRD installed** - The OpenstackProject CRD from `crds/`
-3. **RBAC configured** - ServiceAccount with cluster-wide access to the CRD
+2. **CRDs installed** - All CRDs from `crds/`
+3. **RBAC configured** - ServiceAccount with cluster-wide access to the CRDs
 
 Example deployment using kustomize:
 
@@ -120,36 +285,33 @@ kind: ConfigMap
 metadata:
   name: federation-config
 data:
-  idp-name: my-idp
+  idp-name: satosa
   idp-remote-id: https://idp.example.com
-  sso-domain: federated-users
+  sso-domain: sso-users
 ```
 
 Reference it in OpenstackProject via `federationRef`.
 
-## Status
+## Resource Lifecycle
 
-The operator maintains status on each OpenstackProject:
+### Cluster-scoped Resources
 
-```yaml
-status:
-  phase: Ready  # Pending|Provisioning|Ready|Error|Deleting
-  projectId: "abc123..."
-  groupId: "def456..."
-  networks:
-    - name: internal
-      networkId: "..."
-      subnetId: "..."
-      routerId: "..."
-  securityGroups:
-    - name: allow-ssh
-      id: "..."
-  conditions:
-    - type: ProjectReady
-      status: "True"
-    - type: NetworksReady
-      status: "True"
-```
+- **Domains**: Created/updated on spec changes. Disabled before deletion.
+- **Flavors**: Immutable after creation. Spec changes require delete+recreate.
+- **Images**: Created with metadata, then web-download import triggered. Status polled until active.
+- **Networks**: Provider networks with subnets. Subnets deleted before network on removal.
+
+### Project Resources
+
+- **Projects**: Created with associated user group. Quotas applied after creation.
+- **Networks**: Project networks with optional router to external network.
+- **Security Groups**: Created with rules. Default egress rules added automatically.
+- **Federation**: Mapping created for SSO group-to-project binding.
+
+## Garbage Collection
+
+The operator tracks all managed resources in a ConfigMap (`openstack-operator-managed-resources`).
+Orphaned resources (those without corresponding CRs) are automatically cleaned up.
 
 ## License
 
