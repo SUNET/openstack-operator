@@ -10,6 +10,7 @@ resources:
   - rbac.yaml
   - deployment.yaml
   - service.yaml
+  - networkpolicy.yaml
   # Uncomment if using Prometheus Operator
   # - servicemonitor.yaml
   - ../../crds/openstackproject_crd.yaml
