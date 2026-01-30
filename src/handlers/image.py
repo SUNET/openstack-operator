@@ -1,36 +1,21 @@
 """Kopf handlers for OpenstackImage CRD."""
 
 import logging
+import time
 from typing import Any
 
 import kopf
 
-from openstack_client import OpenStackClient
 from resources.image import delete_image, ensure_image, ensure_image_settings, get_image_status
-from resources.registry import ResourceRegistry
+from state import get_openstack_client, get_registry
 from utils import now_iso
+from metrics import (
+    RECONCILE_TOTAL,
+    RECONCILE_DURATION,
+    RECONCILE_IN_PROGRESS,
+)
 
 logger = logging.getLogger(__name__)
-
-# Module-level registry and client (initialized lazily)
-_registry: ResourceRegistry | None = None
-_os_client: OpenStackClient | None = None
-
-
-def get_registry() -> ResourceRegistry:
-    """Get or create the resource registry."""
-    global _registry
-    if _registry is None:
-        _registry = ResourceRegistry()
-    return _registry
-
-
-def get_openstack_client() -> OpenStackClient:
-    """Get or create the OpenStack client."""
-    global _os_client
-    if _os_client is None:
-        _os_client = OpenStackClient()
-    return _os_client
 
 
 def _set_patch_condition(

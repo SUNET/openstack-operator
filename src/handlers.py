@@ -3,6 +3,7 @@
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -13,9 +14,8 @@ if str(_src_dir) not in sys.path:
 
 import kopf
 from kubernetes import client as k8s_client
-from kubernetes import config as k8s_config
+from prometheus_client import start_http_server
 
-from openstack_client import OpenStackClient
 from resources.federation import FederationManager
 from resources.network import delete_networks, ensure_networks
 from resources.project import delete_project, ensure_project, get_project_info
@@ -25,15 +25,27 @@ from resources.garbage_collection import (
     get_expected_projects_from_crs,
     get_federation_config_from_crs,
 )
-from resources.registry import ResourceRegistry
 from resources.role_binding import apply_role_bindings, get_users_from_role_bindings
 from resources.security_group import delete_security_groups, ensure_security_groups
+from state import state, get_openstack_client, get_registry
 from utils import now_iso
+from metrics import (
+    RECONCILE_TOTAL,
+    RECONCILE_DURATION,
+    RECONCILE_IN_PROGRESS,
+    GC_RUNS,
+    GC_DELETED_RESOURCES,
+    GC_DURATION,
+    set_operator_info,
+)
 
 # Import cluster-scoped resource handlers (registers with Kopf)
 import handlers  # noqa: F401
 
 logger = logging.getLogger(__name__)
+
+# Operator version
+OPERATOR_VERSION = "0.1.0"
 
 
 def _set_patch_condition(
@@ -69,27 +81,6 @@ def _set_patch_condition(
     )
 
 
-# Global OpenStack client and registry (initialized on startup)
-_os_client: OpenStackClient | None = None
-_registry: ResourceRegistry | None = None
-
-
-def get_openstack_client() -> OpenStackClient:
-    """Get or create the OpenStack client."""
-    global _os_client
-    if _os_client is None:
-        _os_client = OpenStackClient()
-    return _os_client
-
-
-def get_registry() -> ResourceRegistry:
-    """Get or create the resource registry."""
-    global _registry
-    if _registry is None:
-        _registry = ResourceRegistry()
-    return _registry
-
-
 def get_federation_config(
     namespace: str, config_ref: dict[str, Any] | None
 ) -> dict[str, str] | None:
@@ -111,12 +102,7 @@ def get_federation_config(
     if not cm_name:
         return None
 
-    try:
-        k8s_config.load_incluster_config()
-    except k8s_config.ConfigException:
-        k8s_config.load_kube_config()
-
-    v1 = k8s_client.CoreV1Api()
+    v1 = state.get_k8s_core_api()
     try:
         cm = v1.read_namespaced_config_map(cm_name, cm_namespace)
         return {
@@ -143,7 +129,27 @@ def configure(settings: kopf.OperatorSettings, **_: Any) -> None:
         settings.watching.namespaces = [watch_namespace]
     else:
         settings.watching.clusterwide = True
-    logger.info("OpenStack operator started")
+
+    # Start Prometheus metrics server
+    metrics_port = int(os.environ.get("METRICS_PORT", "9090"))
+    try:
+        start_http_server(metrics_port)
+        logger.info("Prometheus metrics server started on port %d", metrics_port)
+    except OSError as e:
+        logger.warning("Failed to start metrics server on port %d: %s", metrics_port, e)
+
+    # Set operator info for metrics
+    cloud_name = os.environ.get("OS_CLOUD", "openstack")
+    set_operator_info(OPERATOR_VERSION, cloud_name)
+
+    logger.info("OpenStack operator started (version %s)", OPERATOR_VERSION)
+
+
+@kopf.on.cleanup()
+def cleanup(**_: Any) -> None:
+    """Clean up resources on operator shutdown."""
+    logger.info("OpenStack operator shutting down")
+    state.close()
 
 
 @kopf.on.create("sunet.se", "v1alpha1", "openstackprojects")
@@ -153,21 +159,28 @@ def create_project(
     patch: kopf.Patch,
     namespace: str,
     name: str,
+    meta: dict[str, Any],
     **_: Any,
 ) -> None:
     """Handle OpenstackProject creation."""
     logger.info(f"Creating OpenstackProject: {namespace}/{name}")
+    start_time = time.monotonic()
+    RECONCILE_IN_PROGRESS.labels(resource="OpenstackProject").inc()
 
     # Update status to Provisioning - use patch.status directly
     patch.status["phase"] = "Provisioning"
     patch.status["conditions"] = []
+    patch.status["observedGeneration"] = meta.get("generation", 1)
 
     client = get_openstack_client()
 
     try:
-        # Extract spec values
-        project_name = spec["name"]
-        domain = spec["domain"]
+        # Validate required fields
+        project_name = spec.get("name")
+        domain = spec.get("domain")
+        if not project_name or not domain:
+            raise kopf.PermanentError("spec.name and spec.domain are required")
+
         description = spec.get("description", "")
         enabled = spec.get("enabled", True)
 
@@ -236,13 +249,32 @@ def create_project(
 
         patch.status["phase"] = "Ready"
         patch.status["lastSyncTime"] = now_iso()
+
+        # Record success metrics
+        duration = time.monotonic() - start_time
+        RECONCILE_TOTAL.labels(
+            resource="OpenstackProject", operation="create", status="success"
+        ).inc()
+        RECONCILE_DURATION.labels(
+            resource="OpenstackProject", operation="create"
+        ).observe(duration)
         logger.info(f"Successfully created OpenstackProject: {namespace}/{name}")
 
+    except kopf.PermanentError:
+        RECONCILE_TOTAL.labels(
+            resource="OpenstackProject", operation="create", status="permanent_error"
+        ).inc()
+        raise
     except Exception as e:
         logger.error(f"Failed to create OpenstackProject {namespace}/{name}: {e}")
         patch.status["phase"] = "Error"
         _set_patch_condition(patch, "Ready", "False", "Error", str(e)[:200])
+        RECONCILE_TOTAL.labels(
+            resource="OpenstackProject", operation="create", status="error"
+        ).inc()
         raise kopf.TemporaryError(f"Creation failed: {e}", delay=60)
+    finally:
+        RECONCILE_IN_PROGRESS.labels(resource="OpenstackProject").dec()
 
 
 @kopf.on.update("sunet.se", "v1alpha1", "openstackprojects")
@@ -252,14 +284,18 @@ def update_project(
     patch: kopf.Patch,
     namespace: str,
     name: str,
+    meta: dict[str, Any],
     diff: kopf.Diff,
     **_: Any,
 ) -> None:
     """Handle OpenstackProject updates."""
     logger.info(f"Updating OpenstackProject: {namespace}/{name}")
+    start_time = time.monotonic()
+    RECONCILE_IN_PROGRESS.labels(resource="OpenstackProject").inc()
 
     client = get_openstack_client()
     patch.status["phase"] = "Provisioning"
+    patch.status["observedGeneration"] = meta.get("generation", 1)
 
     # Preserve existing status fields
     for key in ("projectId", "groupId", "networks", "securityGroups", "conditions"):
@@ -267,19 +303,25 @@ def update_project(
             patch.status[key] = status[key]
 
     try:
-        project_name = spec["name"]
-        domain = spec["domain"]
+        # Validate required fields
+        project_name = spec.get("name")
+        domain = spec.get("domain")
+        if not project_name or not domain:
+            raise kopf.PermanentError("spec.name and spec.domain are required")
+
         project_id = status.get("projectId")
         group_id = status.get("groupId")
 
         # If we don't have project_id, treat as create
         if not project_id:
+            RECONCILE_IN_PROGRESS.labels(resource="OpenstackProject").dec()
             create_project(
                 spec=spec,
                 status=status,
                 patch=patch,
                 namespace=namespace,
                 name=name,
+                meta=meta,
             )
             return
 
@@ -365,13 +407,32 @@ def update_project(
 
         patch.status["phase"] = "Ready"
         patch.status["lastSyncTime"] = now_iso()
+
+        # Record success metrics
+        duration = time.monotonic() - start_time
+        RECONCILE_TOTAL.labels(
+            resource="OpenstackProject", operation="update", status="success"
+        ).inc()
+        RECONCILE_DURATION.labels(
+            resource="OpenstackProject", operation="update"
+        ).observe(duration)
         logger.info(f"Successfully updated OpenstackProject: {namespace}/{name}")
 
+    except kopf.PermanentError:
+        RECONCILE_TOTAL.labels(
+            resource="OpenstackProject", operation="update", status="permanent_error"
+        ).inc()
+        raise
     except Exception as e:
         logger.error(f"Failed to update OpenstackProject {namespace}/{name}: {e}")
         patch.status["phase"] = "Error"
         _set_patch_condition(patch, "Ready", "False", "Error", str(e)[:200])
+        RECONCILE_TOTAL.labels(
+            resource="OpenstackProject", operation="update", status="error"
+        ).inc()
         raise kopf.TemporaryError(f"Update failed: {e}", delay=60)
+    finally:
+        RECONCILE_IN_PROGRESS.labels(resource="OpenstackProject").dec()
 
 
 @kopf.on.delete("sunet.se", "v1alpha1", "openstackprojects")
@@ -384,11 +445,13 @@ def delete_project_handler(
 ) -> None:
     """Handle OpenstackProject deletion."""
     logger.info(f"Deleting OpenstackProject: {namespace}/{name}")
+    start_time = time.monotonic()
+    RECONCILE_IN_PROGRESS.labels(resource="OpenstackProject").inc()
 
     client = get_openstack_client()
 
-    project_name = spec["name"]
-    domain = spec["domain"]
+    project_name = spec.get("name", "")
+    domain = spec.get("domain", "")
     project_id = status.get("projectId")
     group_id = status.get("groupId")
 
@@ -396,6 +459,7 @@ def delete_project_handler(
         logger.warning(
             f"No project_id in status for {namespace}/{name}, nothing to delete"
         )
+        RECONCILE_IN_PROGRESS.labels(resource="OpenstackProject").dec()
         return
 
     try:
@@ -428,11 +492,24 @@ def delete_project_handler(
         # 4. Delete project and group
         delete_project(client, project_id, group_id, domain)
 
+        # Record success metrics
+        duration = time.monotonic() - start_time
+        RECONCILE_TOTAL.labels(
+            resource="OpenstackProject", operation="delete", status="success"
+        ).inc()
+        RECONCILE_DURATION.labels(
+            resource="OpenstackProject", operation="delete"
+        ).observe(duration)
         logger.info(f"Successfully deleted OpenstackProject: {namespace}/{name}")
 
     except Exception as e:
         logger.error(f"Failed to delete OpenstackProject {namespace}/{name}: {e}")
+        RECONCILE_TOTAL.labels(
+            resource="OpenstackProject", operation="delete", status="error"
+        ).inc()
         raise kopf.TemporaryError(f"Deletion failed: {e}", delay=60)
+    finally:
+        RECONCILE_IN_PROGRESS.labels(resource="OpenstackProject").dec()
 
 
 @kopf.timer("sunet.se", "v1alpha1", "openstackprojects", interval=300)
@@ -533,14 +610,11 @@ async def garbage_collector(
     managed_domain = os.environ.get("MANAGED_DOMAIN", "sso-users")
     my_identity = f"{namespace}/{name}"
 
+    # Ensure k8s config is loaded once
+    _state.get_k8s_core_api()
+
     while not stopped:
         try:
-            # Load k8s config
-            try:
-                k8s_config.load_incluster_config()
-            except k8s_config.ConfigException:
-                k8s_config.load_kube_config()
-
             # List all OpenstackProject CRs
             api = k8s_client.CustomObjectsApi()
             crs = api.list_cluster_custom_object(
@@ -578,13 +652,14 @@ async def garbage_collector(
                 continue
 
             logger.info(f"Running garbage collection for domain {managed_domain}")
+            gc_start_time = time.monotonic()
 
             # Get expected projects from all CRs
             expected_projects = get_expected_projects_from_crs(cr_items)
             logger.debug(f"Expected projects: {expected_projects}")
 
             # Get federation config for cleaning up orphaned mappings
-            core_api = k8s_client.CoreV1Api()
+            core_api = _state.get_k8s_core_api()
             federation_config = get_federation_config_from_crs(cr_items, core_api)
 
             # Run GC
@@ -593,17 +668,29 @@ async def garbage_collector(
                 client, managed_domain, expected_projects, federation_config
             )
 
-            if result["deleted_projects"] or result["deleted_groups"] or result["deleted_mappings"]:
+            gc_duration = time.monotonic() - gc_start_time
+            GC_DURATION.observe(gc_duration)
+
+            deleted_projects = len(result.get("deleted_projects", []))
+            deleted_groups = len(result.get("deleted_groups", []))
+            deleted_mappings = len(result.get("deleted_mappings", []))
+
+            if deleted_projects or deleted_groups or deleted_mappings:
+                GC_DELETED_RESOURCES.labels(resource_type="project").inc(deleted_projects)
+                GC_DELETED_RESOURCES.labels(resource_type="group").inc(deleted_groups)
+                GC_DELETED_RESOURCES.labels(resource_type="mapping").inc(deleted_mappings)
                 logger.info(
-                    f"GC completed: deleted {len(result['deleted_projects'])} projects, "
-                    f"{len(result['deleted_groups'])} groups, "
-                    f"{len(result['deleted_mappings'])} mappings"
+                    f"GC completed: deleted {deleted_projects} projects, "
+                    f"{deleted_groups} groups, {deleted_mappings} mappings"
                 )
             else:
                 logger.debug("GC completed: no orphaned resources found")
 
+            GC_RUNS.labels(status="success").inc()
+
         except Exception as e:
             logger.error(f"Garbage collection failed: {e}")
+            GC_RUNS.labels(status="error").inc()
 
         await stopped.wait(gc_interval)
 

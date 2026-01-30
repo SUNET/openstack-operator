@@ -6,36 +6,18 @@ created by the operator but no longer have corresponding Kubernetes CRs.
 
 import logging
 import os
+import time
 from typing import Any
 
 import kopf
 from kubernetes import client as k8s_client
-from kubernetes import config as k8s_config
 
 from openstack_client import OpenStackClient
 from resources.registry import ResourceRegistry
+from state import state, get_openstack_client, get_registry
+from metrics import GC_RUNS, GC_DELETED_RESOURCES, GC_DURATION
 
 logger = logging.getLogger(__name__)
-
-# Module-level registry and client (initialized lazily)
-_registry: ResourceRegistry | None = None
-_os_client: OpenStackClient | None = None
-
-
-def get_registry() -> ResourceRegistry:
-    """Get or create the resource registry."""
-    global _registry
-    if _registry is None:
-        _registry = ResourceRegistry()
-    return _registry
-
-
-def get_openstack_client() -> OpenStackClient:
-    """Get or create the OpenStack client."""
-    global _os_client
-    if _os_client is None:
-        _os_client = OpenStackClient()
-    return _os_client
 
 
 def _get_expected_cr_names(api: k8s_client.CustomObjectsApi, plural: str) -> set[str]:
@@ -151,15 +133,12 @@ async def cluster_garbage_collector(
     gc_interval = int(os.environ.get("CLUSTER_GC_INTERVAL_SECONDS", "600"))
     my_identity = name
 
+    # Ensure k8s config is loaded
+    state.get_k8s_custom_api()
+
     while not stopped:
         try:
-            # Load k8s config
-            try:
-                k8s_config.load_incluster_config()
-            except k8s_config.ConfigException:
-                k8s_config.load_kube_config()
-
-            api = k8s_client.CustomObjectsApi()
+            api = state.get_k8s_custom_api()
 
             # Simple leader election: only the first domain CR runs GC
             domain_crs = api.list_cluster_custom_object(
@@ -188,6 +167,7 @@ async def cluster_garbage_collector(
                 continue
 
             logger.info("Running cluster-scoped garbage collection")
+            gc_start_time = time.monotonic()
 
             # Get expected CRs for each resource type
             expected_crs = {
@@ -202,14 +182,25 @@ async def cluster_garbage_collector(
             registry = get_registry()
             result = _collect_cluster_garbage(client, registry, expected_crs)
 
-            # Log results
+            gc_duration = time.monotonic() - gc_start_time
+            GC_DURATION.observe(gc_duration)
+
+            # Log and record metrics
             total_deleted = sum(len(v) for v in result.values())
             if total_deleted > 0:
+                for resource_type, deleted_list in result.items():
+                    if deleted_list:
+                        # Extract resource type from key (e.g., "deleted_domains" -> "domain")
+                        rtype = resource_type.replace("deleted_", "").rstrip("s")
+                        GC_DELETED_RESOURCES.labels(resource_type=rtype).inc(len(deleted_list))
                 logger.info(f"Cluster GC completed: {result}")
             else:
                 logger.debug("Cluster GC completed: no orphaned resources found")
 
+            GC_RUNS.labels(status="success").inc()
+
         except Exception as e:
             logger.error(f"Cluster garbage collection failed: {e}")
+            GC_RUNS.labels(status="error").inc()
 
         await stopped.wait(gc_interval)

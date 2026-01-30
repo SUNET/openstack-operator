@@ -9,6 +9,9 @@ resources:
   - serviceaccount.yaml
   - rbac.yaml
   - deployment.yaml
+  - service.yaml
+  # Uncomment if using Prometheus Operator
+  # - servicemonitor.yaml
   - ../../crds/openstackproject_crd.yaml
   - ../../crds/openstackdomain_crd.yaml
   - ../../crds/openstackflavor_crd.yaml

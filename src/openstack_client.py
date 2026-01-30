@@ -22,11 +22,44 @@ from openstack.network.v2.security_group_rule import SecurityGroupRule
 from openstack.network.v2.subnet import Subnet
 
 from models import OpenStackAPIError, ResourceNotFoundError
+from metrics import (
+    OPENSTACK_API_CALLS,
+    OPENSTACK_API_DURATION,
+    OPENSTACK_API_RETRIES,
+)
 
 logger = logging.getLogger(__name__)
 
 P = ParamSpec("P")
 T = TypeVar("T")
+
+
+def _get_service_from_func_name(func_name: str) -> str:
+    """Extract OpenStack service name from function name."""
+    service_prefixes = {
+        "domain": "identity",
+        "project": "identity",
+        "group": "identity",
+        "user": "identity",
+        "role": "identity",
+        "identity_provider": "identity",
+        "mapping": "identity",
+        "federation": "identity",
+        "network": "network",
+        "subnet": "network",
+        "router": "network",
+        "security_group": "network",
+        "flavor": "compute",
+        "image": "image",
+        "compute_quota": "compute",
+        "volume_quota": "block_storage",
+        "network_quota": "network",
+    }
+    func_lower = func_name.lower()
+    for prefix, service in service_prefixes.items():
+        if prefix in func_lower:
+            return service
+    return "unknown"
 
 
 def retry_on_error(
@@ -35,20 +68,40 @@ def retry_on_error(
     backoff: float = 2.0,
     exceptions: tuple[type[Exception], ...] = (HttpException,),
 ) -> Callable[[Callable[P, T]], Callable[P, T]]:
-    """Decorator to retry operations on transient errors."""
+    """Decorator to retry operations on transient errors with metrics."""
 
     def decorator(func: Callable[P, T]) -> Callable[P, T]:
         @wraps(func)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
             last_exception: Exception | None = None
             current_delay = delay
+            service = _get_service_from_func_name(func.__name__)
+            operation = func.__name__
 
             for attempt in range(max_retries + 1):
+                start_time = time.monotonic()
                 try:
-                    return func(*args, **kwargs)
+                    result = func(*args, **kwargs)
+                    # Record successful API call
+                    duration = time.monotonic() - start_time
+                    OPENSTACK_API_CALLS.labels(
+                        service=service, operation=operation, status="success"
+                    ).inc()
+                    OPENSTACK_API_DURATION.labels(
+                        service=service, operation=operation
+                    ).observe(duration)
+                    return result
                 except exceptions as e:
                     last_exception = e
+                    duration = time.monotonic() - start_time
+                    OPENSTACK_API_DURATION.labels(
+                        service=service, operation=operation
+                    ).observe(duration)
+
                     if attempt < max_retries:
+                        OPENSTACK_API_RETRIES.labels(
+                            service=service, operation=operation
+                        ).inc()
                         logger.warning(
                             "Attempt %d/%d failed for %s: %s. Retrying in %.1fs...",
                             attempt + 1,
@@ -60,6 +113,9 @@ def retry_on_error(
                         time.sleep(current_delay)
                         current_delay *= backoff
                     else:
+                        OPENSTACK_API_CALLS.labels(
+                            service=service, operation=operation, status="error"
+                        ).inc()
                         logger.error(
                             "All %d attempts failed for %s",
                             max_retries + 1,

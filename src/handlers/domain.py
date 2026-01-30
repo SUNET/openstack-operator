@@ -1,36 +1,21 @@
 """Kopf handlers for OpenstackDomain CRD."""
 
 import logging
+import time
 from typing import Any
 
 import kopf
 
-from openstack_client import OpenStackClient
 from resources.domain import delete_domain, ensure_domain, get_domain_info
-from resources.registry import ResourceRegistry
+from state import get_openstack_client, get_registry
 from utils import now_iso
+from metrics import (
+    RECONCILE_TOTAL,
+    RECONCILE_DURATION,
+    RECONCILE_IN_PROGRESS,
+)
 
 logger = logging.getLogger(__name__)
-
-# Module-level registry and client (initialized lazily)
-_registry: ResourceRegistry | None = None
-_os_client: OpenStackClient | None = None
-
-
-def get_registry() -> ResourceRegistry:
-    """Get or create the resource registry."""
-    global _registry
-    if _registry is None:
-        _registry = ResourceRegistry()
-    return _registry
-
-
-def get_openstack_client() -> OpenStackClient:
-    """Get or create the OpenStack client."""
-    global _os_client
-    if _os_client is None:
-        _os_client = OpenStackClient()
-    return _os_client
 
 
 def _set_patch_condition(
@@ -71,19 +56,26 @@ def create_domain_handler(
     spec: dict[str, Any],
     patch: kopf.Patch,
     name: str,
+    meta: dict[str, Any],
     **_: Any,
 ) -> None:
     """Handle OpenstackDomain creation."""
     logger.info(f"Creating OpenstackDomain: {name}")
+    start_time = time.monotonic()
+    RECONCILE_IN_PROGRESS.labels(resource="OpenstackDomain").inc()
 
     patch.status["phase"] = "Provisioning"
     patch.status["conditions"] = []
+    patch.status["observedGeneration"] = meta.get("generation", 1)
 
     client = get_openstack_client()
     registry = get_registry()
 
     try:
-        domain_name = spec["name"]
+        domain_name = spec.get("name")
+        if not domain_name:
+            raise kopf.PermanentError("spec.name is required")
+
         description = spec.get("description", "")
         enabled = spec.get("enabled", True)
 
@@ -99,13 +91,30 @@ def create_domain_handler(
         patch.status["phase"] = "Ready"
         patch.status["lastSyncTime"] = now_iso()
 
+        duration = time.monotonic() - start_time
+        RECONCILE_TOTAL.labels(
+            resource="OpenstackDomain", operation="create", status="success"
+        ).inc()
+        RECONCILE_DURATION.labels(
+            resource="OpenstackDomain", operation="create"
+        ).observe(duration)
         logger.info(f"Successfully created OpenstackDomain: {name} (id={domain_id})")
 
+    except kopf.PermanentError:
+        RECONCILE_TOTAL.labels(
+            resource="OpenstackDomain", operation="create", status="permanent_error"
+        ).inc()
+        raise
     except Exception as e:
         logger.error(f"Failed to create OpenstackDomain {name}: {e}")
         patch.status["phase"] = "Error"
         _set_patch_condition(patch, "DomainReady", "False", "Error", str(e)[:200])
+        RECONCILE_TOTAL.labels(
+            resource="OpenstackDomain", operation="create", status="error"
+        ).inc()
         raise kopf.TemporaryError(f"Creation failed: {e}", delay=60)
+    finally:
+        RECONCILE_IN_PROGRESS.labels(resource="OpenstackDomain").dec()
 
 
 @kopf.on.update("sunet.se", "v1alpha1", "openstackdomains")
@@ -114,13 +123,17 @@ def update_domain_handler(
     status: dict[str, Any],
     patch: kopf.Patch,
     name: str,
+    meta: dict[str, Any],
     **_: Any,
 ) -> None:
     """Handle OpenstackDomain updates."""
     logger.info(f"Updating OpenstackDomain: {name}")
+    start_time = time.monotonic()
+    RECONCILE_IN_PROGRESS.labels(resource="OpenstackDomain").inc()
 
     client = get_openstack_client()
     patch.status["phase"] = "Provisioning"
+    patch.status["observedGeneration"] = meta.get("generation", 1)
 
     # Preserve existing status fields
     for key in ("domainId", "conditions"):
@@ -128,14 +141,18 @@ def update_domain_handler(
             patch.status[key] = status[key]
 
     try:
-        domain_name = spec["name"]
+        domain_name = spec.get("name")
+        if not domain_name:
+            raise kopf.PermanentError("spec.name is required")
+
         description = spec.get("description", "")
         enabled = spec.get("enabled", True)
         domain_id = status.get("domainId")
 
         if not domain_id:
             # No domain ID, treat as create
-            create_domain_handler(spec=spec, patch=patch, name=name)
+            RECONCILE_IN_PROGRESS.labels(resource="OpenstackDomain").dec()
+            create_domain_handler(spec=spec, patch=patch, name=name, meta=meta)
             return
 
         # Update existing domain
@@ -145,13 +162,30 @@ def update_domain_handler(
         patch.status["phase"] = "Ready"
         patch.status["lastSyncTime"] = now_iso()
 
+        duration = time.monotonic() - start_time
+        RECONCILE_TOTAL.labels(
+            resource="OpenstackDomain", operation="update", status="success"
+        ).inc()
+        RECONCILE_DURATION.labels(
+            resource="OpenstackDomain", operation="update"
+        ).observe(duration)
         logger.info(f"Successfully updated OpenstackDomain: {name}")
 
+    except kopf.PermanentError:
+        RECONCILE_TOTAL.labels(
+            resource="OpenstackDomain", operation="update", status="permanent_error"
+        ).inc()
+        raise
     except Exception as e:
         logger.error(f"Failed to update OpenstackDomain {name}: {e}")
         patch.status["phase"] = "Error"
         _set_patch_condition(patch, "DomainReady", "False", "Error", str(e)[:200])
+        RECONCILE_TOTAL.labels(
+            resource="OpenstackDomain", operation="update", status="error"
+        ).inc()
         raise kopf.TemporaryError(f"Update failed: {e}", delay=60)
+    finally:
+        RECONCILE_IN_PROGRESS.labels(resource="OpenstackDomain").dec()
 
 
 @kopf.on.delete("sunet.se", "v1alpha1", "openstackdomains")
@@ -163,25 +197,41 @@ def delete_domain_handler(
 ) -> None:
     """Handle OpenstackDomain deletion."""
     logger.info(f"Deleting OpenstackDomain: {name}")
+    start_time = time.monotonic()
+    RECONCILE_IN_PROGRESS.labels(resource="OpenstackDomain").inc()
 
     client = get_openstack_client()
     registry = get_registry()
 
-    domain_name = spec["name"]
+    domain_name = spec.get("name", "")
     domain_id = status.get("domainId")
 
     if not domain_id:
         logger.warning(f"No domainId in status for {name}, nothing to delete")
+        RECONCILE_IN_PROGRESS.labels(resource="OpenstackDomain").dec()
         return
 
     try:
         delete_domain(client, domain_id)
         registry.unregister("domains", domain_name)
+
+        duration = time.monotonic() - start_time
+        RECONCILE_TOTAL.labels(
+            resource="OpenstackDomain", operation="delete", status="success"
+        ).inc()
+        RECONCILE_DURATION.labels(
+            resource="OpenstackDomain", operation="delete"
+        ).observe(duration)
         logger.info(f"Successfully deleted OpenstackDomain: {name}")
 
     except Exception as e:
         logger.error(f"Failed to delete OpenstackDomain {name}: {e}")
+        RECONCILE_TOTAL.labels(
+            resource="OpenstackDomain", operation="delete", status="error"
+        ).inc()
         raise kopf.TemporaryError(f"Deletion failed: {e}", delay=60)
+    finally:
+        RECONCILE_IN_PROGRESS.labels(resource="OpenstackDomain").dec()
 
 
 @kopf.timer("sunet.se", "v1alpha1", "openstackdomains", interval=300)

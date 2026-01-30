@@ -33,12 +33,17 @@ spec:
               value: /etc/openstack/clouds.yaml
             - name: OS_CLOUD
               value: openstack
+            - name: METRICS_PORT
+              value: "9090"
             # Uncomment to watch a specific namespace only
             # - name: WATCH_NAMESPACE
             #   value: openstack-operator
           ports:
             - name: health
               containerPort: 8080
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
               protocol: TCP
           livenessProbe:
             httpGet:
