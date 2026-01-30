@@ -611,7 +611,7 @@ async def garbage_collector(
     my_identity = f"{namespace}/{name}"
 
     # Ensure k8s config is loaded once
-    _state.get_k8s_core_api()
+    state.get_k8s_core_api()
 
     while not stopped:
         try:
