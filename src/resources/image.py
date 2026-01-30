@@ -45,7 +45,10 @@ def ensure_image(
         return existing.id, existing.status
 
     # Create new image
-    content = spec["content"]
+    content = spec.get("content")
+    if not content:
+        raise ValueError(f"Image {name} does not exist and no content specified for creation")
+
     image = client.create_image(
         name=name,
         disk_format=content["diskFormat"],
@@ -69,6 +72,47 @@ def ensure_image(
     status = updated_image.status if updated_image else "queued"
 
     return image.id, status
+
+
+def ensure_image_settings(
+    client: OpenStackClient,
+    spec: dict[str, Any],
+) -> tuple[str, str] | None:
+    """Ensure an existing image has the correct settings.
+
+    This function only manages settings on existing images. It does not create images.
+
+    Args:
+        client: OpenStack client
+        spec: Image specification from CRD
+
+    Returns:
+        Tuple of (image_id, upload_status) if image exists, None if not found
+    """
+    name = spec["name"]
+    existing = client.get_image(name)
+
+    if not existing:
+        logger.info(f"Image {name} not found (createIfMissing=false, skipping creation)")
+        return None
+
+    logger.info(f"Managing settings for existing image {name} (id={existing.id})")
+
+    # Update mutable properties
+    visibility = spec.get("visibility", "private")
+    protected = spec.get("protected", False)
+    tags = spec.get("tags", [])
+    properties = spec.get("properties", {})
+
+    client.update_image(
+        existing.id,
+        visibility=visibility,
+        protected=protected,
+        tags=tags,
+        properties=properties,
+    )
+
+    return existing.id, existing.status
 
 
 def get_image_status(

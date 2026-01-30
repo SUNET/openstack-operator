@@ -6,7 +6,7 @@ from typing import Any
 import kopf
 
 from openstack_client import OpenStackClient
-from resources.image import delete_image, ensure_image, get_image_status
+from resources.image import delete_image, ensure_image, ensure_image_settings, get_image_status
 from resources.registry import ResourceRegistry
 from utils import now_iso
 
@@ -81,35 +81,65 @@ def create_image_handler(
 
     client = get_openstack_client()
     registry = get_registry()
+    is_external = spec.get("external", False)
 
     try:
         image_name = spec["name"]
 
-        _set_patch_condition(patch, "ImageReady", "False", "Creating", "")
+        if is_external:
+            # External image: only manage settings on existing images
+            _set_patch_condition(patch, "ImageReady", "False", "Configuring", "")
 
-        # Create image and start import (async operation)
-        image_id, upload_status = ensure_image(client, spec)
+            result = ensure_image_settings(client, spec)
 
-        # Register in ConfigMap
-        registry.register("images", image_name, image_id, cr_name=name)
+            if result is None:
+                # Image doesn't exist
+                _set_patch_condition(
+                    patch, "ImageReady", "False", "NotFound",
+                    f"External image '{image_name}' not found in OpenStack"
+                )
+                patch.status["phase"] = "Pending"
+                patch.status["lastSyncTime"] = now_iso()
+                logger.warning(f"External image {name} not found, will retry")
+                raise kopf.TemporaryError(f"External image not found: {image_name}", delay=60)
 
-        patch.status["imageId"] = image_id
-        patch.status["uploadStatus"] = upload_status
-
-        if upload_status == "active":
-            _set_patch_condition(patch, "ImageReady", "True", "Active", "")
+            image_id, upload_status = result
+            # Don't register external images for garbage collection
+            patch.status["imageId"] = image_id
+            patch.status["uploadStatus"] = upload_status
+            _set_patch_condition(patch, "ImageReady", "True", "Configured", "")
             patch.status["phase"] = "Ready"
+            patch.status["lastSyncTime"] = now_iso()
+            logger.info(f"Configured external OpenstackImage: {name} (id={image_id})")
+
         else:
-            _set_patch_condition(
-                patch, "ImageReady", "False", "Importing",
-                f"Image import in progress (status: {upload_status})"
-            )
-            # Keep phase as Provisioning until import completes
+            # Managed image: create if needed
+            _set_patch_condition(patch, "ImageReady", "False", "Creating", "")
 
-        patch.status["lastSyncTime"] = now_iso()
+            # Create image and start import (async operation)
+            image_id, upload_status = ensure_image(client, spec)
 
-        logger.info(f"Created OpenstackImage: {name} (id={image_id}, status={upload_status})")
+            # Register in ConfigMap for garbage collection
+            registry.register("images", image_name, image_id, cr_name=name)
 
+            patch.status["imageId"] = image_id
+            patch.status["uploadStatus"] = upload_status
+
+            if upload_status == "active":
+                _set_patch_condition(patch, "ImageReady", "True", "Active", "")
+                patch.status["phase"] = "Ready"
+            else:
+                _set_patch_condition(
+                    patch, "ImageReady", "False", "Importing",
+                    f"Image import in progress (status: {upload_status})"
+                )
+                # Keep phase as Provisioning until import completes
+
+            patch.status["lastSyncTime"] = now_iso()
+            logger.info(f"Created OpenstackImage: {name} (id={image_id}, status={upload_status})")
+
+    except kopf.TemporaryError:
+        raise
     except Exception as e:
         logger.error(f"Failed to create OpenstackImage {name}: {e}")
         patch.status["phase"] = "Error"
@@ -185,10 +215,17 @@ def delete_image_handler(
     """Handle OpenstackImage deletion."""
     logger.info(f"Deleting OpenstackImage: {name}")
 
+    is_external = spec.get("external", False)
+    image_name = spec["name"]
+
+    if is_external:
+        # External images are not deleted - we don't own them
+        logger.info(f"Skipping deletion of external image {name} (not owned by operator)")
+        return
+
     client = get_openstack_client()
     registry = get_registry()
 
-    image_name = spec["name"]
     image_id = status.get("imageId")
 
     if not image_id:
@@ -280,7 +317,25 @@ def reconcile_image(
     **_: Any,
 ) -> None:
     """Periodic reconciliation to detect and repair drift."""
-    if status.get("phase") != "Ready":
+    current_phase = status.get("phase")
+    is_external = spec.get("external", False)
+
+    # For external images in Pending state, retry finding them
+    if is_external and current_phase == "Pending":
+        logger.debug(f"Retrying external image lookup for {name}")
+        client = get_openstack_client()
+        result = ensure_image_settings(client, spec)
+        if result:
+            image_id, upload_status = result
+            patch.status["imageId"] = image_id
+            patch.status["uploadStatus"] = upload_status
+            patch.status["phase"] = "Ready"
+            _set_patch_condition(patch, "ImageReady", "True", "Configured", "")
+            patch.status["lastSyncTime"] = now_iso()
+            logger.info(f"External image {name} found and configured")
+        return
+
+    if current_phase != "Ready":
         return
 
     logger.debug(f"Reconciling OpenstackImage: {name}")
@@ -291,9 +346,20 @@ def reconcile_image(
     try:
         image = client.get_image(image_name)
         if not image:
-            logger.warning(f"Image {image_name} not found, triggering recreate")
-            patch.status["phase"] = "Pending"
-            patch.status["imageId"] = None
+            if is_external:
+                # External image disappeared - go back to Pending
+                logger.warning(f"External image {image_name} not found")
+                patch.status["phase"] = "Pending"
+                patch.status["imageId"] = None
+                _set_patch_condition(
+                    patch, "ImageReady", "False", "NotFound",
+                    f"External image '{image_name}' not found in OpenStack"
+                )
+            else:
+                # Managed image - trigger recreate
+                logger.warning(f"Image {image_name} not found, triggering recreate")
+                patch.status["phase"] = "Pending"
+                patch.status["imageId"] = None
             return
 
         if image.id != status.get("imageId"):
@@ -301,6 +367,20 @@ def reconcile_image(
             patch.status["phase"] = "Pending"
             patch.status["imageId"] = image.id
             return
+
+        # Ensure settings are still correct
+        visibility = spec.get("visibility", "private")
+        protected = spec.get("protected", False)
+
+        if image.visibility != visibility or image.is_protected != protected:
+            logger.info(f"Drift detected for {image_name}, updating settings")
+            client.update_image(
+                image.id,
+                visibility=visibility,
+                protected=protected,
+                tags=spec.get("tags", []),
+                properties=spec.get("properties", {}),
+            )
 
         patch.status["lastSyncTime"] = now_iso()
 

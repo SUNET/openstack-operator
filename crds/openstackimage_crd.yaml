@@ -27,6 +27,9 @@ spec:
         - name: Visibility
           type: string
           jsonPath: .spec.visibility
+        - name: External
+          type: boolean
+          jsonPath: .spec.external
         - name: Phase
           type: string
           jsonPath: .status.phase
@@ -46,13 +49,16 @@ spec:
               type: object
               required:
                 - name
-                - content
               properties:
                 name:
                   type: string
                   description: "OpenStack image name (display name)"
                   minLength: 1
                   maxLength: 255
+                external:
+                  type: boolean
+                  description: "If true, the image is externally managed. Only settings (visibility, protected, etc.) are enforced on existing images. The image is not created or deleted by the operator."
+                  default: false
                 visibility:
                   type: string
                   description: "Image visibility"
