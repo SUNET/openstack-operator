@@ -965,8 +965,21 @@ class OpenStackClient:
         can raise KeyError when parsing malformed API responses (e.g., when a
         proxy returns an error page instead of JSON).
         """
-        networks = list(self.conn.network.networks(name=name))
-        return networks[0] if networks else None
+        try:
+            networks = list(self.conn.network.networks(name=name))
+            return networks[0] if networks else None
+        except KeyError as e:
+            # Log debug info to help diagnose API issues
+            try:
+                endpoint = self.conn.network.get_endpoint()
+                logger.error(
+                    "KeyError '%s' when listing networks. Endpoint: %s",
+                    e,
+                    endpoint,
+                )
+            except Exception:
+                pass
+            raise
 
     @retry_on_error()
     def create_provider_network(
