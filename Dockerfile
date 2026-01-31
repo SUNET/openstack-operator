@@ -21,7 +21,7 @@ COPY pyproject.toml README.md ./
 COPY src/ ./src/
 
 # Install Python package and dependencies
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir --root-user-action=ignore --disable-pip-version-check .
 
 # Switch to non-root user
 USER operator
