@@ -135,3 +135,9 @@ def init_metrics() -> None:
     for status in statuses:
         CLUSTER_GC_RUNS.labels(status=status)
         PROJECT_GC_RUNS.labels(status=status)
+
+    # Initialize GC deleted resources metrics
+    for resource_type in ["domain", "flavor", "image", "provider_network"]:
+        CLUSTER_GC_DELETED_RESOURCES.labels(resource_type=resource_type)
+    for resource_type in ["project", "group", "mapping"]:
+        PROJECT_GC_DELETED_RESOURCES.labels(resource_type=resource_type)
