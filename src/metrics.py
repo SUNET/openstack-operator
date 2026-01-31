@@ -103,3 +103,35 @@ OPERATOR_INFO = Info(
 def set_operator_info(version: str, cloud: str) -> None:
     """Set operator info labels."""
     OPERATOR_INFO.info({"version": version, "cloud": cloud})
+
+
+def init_metrics() -> None:
+    """Initialize all metrics with zero values.
+
+    Prometheus metrics with labels don't appear until used.
+    This ensures all metrics are visible immediately at startup.
+    """
+    resources = [
+        "OpenstackProject",
+        "OpenstackDomain",
+        "OpenstackFlavor",
+        "OpenstackImage",
+        "OpenstackNetwork",
+    ]
+    operations = ["create", "update", "delete"]
+    statuses = ["success", "error"]
+
+    # Initialize reconciliation metrics
+    for resource in resources:
+        RECONCILE_IN_PROGRESS.labels(resource=resource).set(0)
+        for operation in operations:
+            RECONCILE_DURATION.labels(resource=resource, operation=operation)
+            for status in statuses:
+                RECONCILE_TOTAL.labels(
+                    resource=resource, operation=operation, status=status
+                )
+
+    # Initialize GC metrics
+    for status in statuses:
+        CLUSTER_GC_RUNS.labels(status=status)
+        PROJECT_GC_RUNS.labels(status=status)

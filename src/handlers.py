@@ -37,6 +37,7 @@ from metrics import (
     PROJECT_GC_DELETED_RESOURCES,
     PROJECT_GC_DURATION,
     set_operator_info,
+    init_metrics,
 )
 
 # Import cluster-scoped resource handlers (registers with Kopf)
@@ -138,8 +139,9 @@ def configure(settings: kopf.OperatorSettings, **_: Any) -> None:
     except OSError as e:
         logger.warning("Failed to start metrics server on port %d: %s", metrics_port, e)
 
-    # Set operator info for metrics
+    # Initialize metrics and set operator info
     cloud_name = os.environ.get("OS_CLOUD", "openstack")
+    init_metrics()
     set_operator_info(OPERATOR_VERSION, cloud_name)
 
     logger.info("OpenStack operator started (version %s)", OPERATOR_VERSION)
