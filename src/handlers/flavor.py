@@ -60,6 +60,8 @@ def create_flavor_handler(
 ) -> None:
     """Handle OpenstackFlavor creation."""
     logger.info(f"Creating OpenstackFlavor: {name}")
+    start_time = time.monotonic()
+    RECONCILE_IN_PROGRESS.labels(resource="OpenstackFlavor").inc()
 
     patch.status["phase"] = "Provisioning"
     patch.status["conditions"] = []
@@ -82,13 +84,25 @@ def create_flavor_handler(
         patch.status["phase"] = "Ready"
         patch.status["lastSyncTime"] = now_iso()
 
+        duration = time.monotonic() - start_time
+        RECONCILE_TOTAL.labels(
+            resource="OpenstackFlavor", operation="create", status="success"
+        ).inc()
+        RECONCILE_DURATION.labels(
+            resource="OpenstackFlavor", operation="create"
+        ).observe(duration)
         logger.info(f"Successfully created OpenstackFlavor: {name} (id={flavor_id})")
 
     except Exception as e:
         logger.error(f"Failed to create OpenstackFlavor {name}: {e}")
         patch.status["phase"] = "Error"
         _set_patch_condition(patch, "FlavorReady", "False", "Error", str(e)[:200])
+        RECONCILE_TOTAL.labels(
+            resource="OpenstackFlavor", operation="create", status="error"
+        ).inc()
         raise kopf.TemporaryError(f"Creation failed: {e}", delay=60)
+    finally:
+        RECONCILE_IN_PROGRESS.labels(resource="OpenstackFlavor").dec()
 
 
 @kopf.on.update("sunet.se", "v1alpha1", "openstackflavors")
@@ -106,6 +120,8 @@ def update_flavor_handler(
     we must delete and recreate the flavor.
     """
     logger.info(f"Updating OpenstackFlavor: {name}")
+    start_time = time.monotonic()
+    RECONCILE_IN_PROGRESS.labels(resource="OpenstackFlavor").inc()
 
     client = get_openstack_client()
     registry = get_registry()
@@ -122,6 +138,7 @@ def update_flavor_handler(
 
         if not flavor_id:
             # No flavor ID, treat as create
+            RECONCILE_IN_PROGRESS.labels(resource="OpenstackFlavor").dec()
             create_flavor_handler(spec=spec, patch=patch, name=name)
             return
 
@@ -148,13 +165,25 @@ def update_flavor_handler(
         patch.status["phase"] = "Ready"
         patch.status["lastSyncTime"] = now_iso()
 
+        duration = time.monotonic() - start_time
+        RECONCILE_TOTAL.labels(
+            resource="OpenstackFlavor", operation="update", status="success"
+        ).inc()
+        RECONCILE_DURATION.labels(
+            resource="OpenstackFlavor", operation="update"
+        ).observe(duration)
         logger.info(f"Successfully updated OpenstackFlavor: {name}")
 
     except Exception as e:
         logger.error(f"Failed to update OpenstackFlavor {name}: {e}")
         patch.status["phase"] = "Error"
         _set_patch_condition(patch, "FlavorReady", "False", "Error", str(e)[:200])
+        RECONCILE_TOTAL.labels(
+            resource="OpenstackFlavor", operation="update", status="error"
+        ).inc()
         raise kopf.TemporaryError(f"Update failed: {e}", delay=60)
+    finally:
+        RECONCILE_IN_PROGRESS.labels(resource="OpenstackFlavor").dec()
 
 
 @kopf.on.delete("sunet.se", "v1alpha1", "openstackflavors")
@@ -166,6 +195,8 @@ def delete_flavor_handler(
 ) -> None:
     """Handle OpenstackFlavor deletion."""
     logger.info(f"Deleting OpenstackFlavor: {name}")
+    start_time = time.monotonic()
+    RECONCILE_IN_PROGRESS.labels(resource="OpenstackFlavor").inc()
 
     client = get_openstack_client()
     registry = get_registry()
@@ -175,16 +206,30 @@ def delete_flavor_handler(
 
     if not flavor_id:
         logger.warning(f"No flavorId in status for {name}, nothing to delete")
+        RECONCILE_IN_PROGRESS.labels(resource="OpenstackFlavor").dec()
         return
 
     try:
         delete_flavor(client, flavor_id)
         registry.unregister("flavors", flavor_name)
+
+        duration = time.monotonic() - start_time
+        RECONCILE_TOTAL.labels(
+            resource="OpenstackFlavor", operation="delete", status="success"
+        ).inc()
+        RECONCILE_DURATION.labels(
+            resource="OpenstackFlavor", operation="delete"
+        ).observe(duration)
         logger.info(f"Successfully deleted OpenstackFlavor: {name}")
 
     except Exception as e:
         logger.error(f"Failed to delete OpenstackFlavor {name}: {e}")
+        RECONCILE_TOTAL.labels(
+            resource="OpenstackFlavor", operation="delete", status="error"
+        ).inc()
         raise kopf.TemporaryError(f"Deletion failed: {e}", delay=60)
+    finally:
+        RECONCILE_IN_PROGRESS.labels(resource="OpenstackFlavor").dec()
 
 
 @kopf.timer("sunet.se", "v1alpha1", "openstackflavors", interval=300)

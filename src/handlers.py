@@ -33,9 +33,9 @@ from metrics import (
     RECONCILE_TOTAL,
     RECONCILE_DURATION,
     RECONCILE_IN_PROGRESS,
-    GC_RUNS,
-    GC_DELETED_RESOURCES,
-    GC_DURATION,
+    PROJECT_GC_RUNS,
+    PROJECT_GC_DELETED_RESOURCES,
+    PROJECT_GC_DURATION,
     set_operator_info,
 )
 
@@ -659,7 +659,7 @@ async def garbage_collector(
             logger.debug(f"Expected projects: {expected_projects}")
 
             # Get federation config for cleaning up orphaned mappings
-            core_api = _state.get_k8s_core_api()
+            core_api = state.get_k8s_core_api()
             federation_config = get_federation_config_from_crs(cr_items, core_api)
 
             # Run GC
@@ -669,16 +669,16 @@ async def garbage_collector(
             )
 
             gc_duration = time.monotonic() - gc_start_time
-            GC_DURATION.observe(gc_duration)
+            PROJECT_GC_DURATION.observe(gc_duration)
 
             deleted_projects = len(result.get("deleted_projects", []))
             deleted_groups = len(result.get("deleted_groups", []))
             deleted_mappings = len(result.get("deleted_mappings", []))
 
             if deleted_projects or deleted_groups or deleted_mappings:
-                GC_DELETED_RESOURCES.labels(resource_type="project").inc(deleted_projects)
-                GC_DELETED_RESOURCES.labels(resource_type="group").inc(deleted_groups)
-                GC_DELETED_RESOURCES.labels(resource_type="mapping").inc(deleted_mappings)
+                PROJECT_GC_DELETED_RESOURCES.labels(resource_type="project").inc(deleted_projects)
+                PROJECT_GC_DELETED_RESOURCES.labels(resource_type="group").inc(deleted_groups)
+                PROJECT_GC_DELETED_RESOURCES.labels(resource_type="mapping").inc(deleted_mappings)
                 logger.info(
                     f"GC completed: deleted {deleted_projects} projects, "
                     f"{deleted_groups} groups, {deleted_mappings} mappings"
@@ -686,11 +686,11 @@ async def garbage_collector(
             else:
                 logger.debug("GC completed: no orphaned resources found")
 
-            GC_RUNS.labels(status="success").inc()
+            PROJECT_GC_RUNS.labels(status="success").inc()
 
         except Exception as e:
             logger.error(f"Garbage collection failed: {e}")
-            GC_RUNS.labels(status="error").inc()
+            PROJECT_GC_RUNS.labels(status="error").inc()
 
         await stopped.wait(gc_interval)
 

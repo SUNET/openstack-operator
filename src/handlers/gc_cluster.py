@@ -15,7 +15,7 @@ from kubernetes import client as k8s_client
 from openstack_client import OpenStackClient
 from resources.registry import ResourceRegistry
 from state import state, get_openstack_client, get_registry
-from metrics import GC_RUNS, GC_DELETED_RESOURCES, GC_DURATION
+from metrics import CLUSTER_GC_RUNS, CLUSTER_GC_DELETED_RESOURCES, CLUSTER_GC_DURATION
 
 logger = logging.getLogger(__name__)
 
@@ -183,7 +183,7 @@ async def cluster_garbage_collector(
             result = _collect_cluster_garbage(client, registry, expected_crs)
 
             gc_duration = time.monotonic() - gc_start_time
-            GC_DURATION.observe(gc_duration)
+            CLUSTER_GC_DURATION.observe(gc_duration)
 
             # Log and record metrics
             total_deleted = sum(len(v) for v in result.values())
@@ -192,15 +192,15 @@ async def cluster_garbage_collector(
                     if deleted_list:
                         # Extract resource type from key (e.g., "deleted_domains" -> "domain")
                         rtype = resource_type.replace("deleted_", "").rstrip("s")
-                        GC_DELETED_RESOURCES.labels(resource_type=rtype).inc(len(deleted_list))
+                        CLUSTER_GC_DELETED_RESOURCES.labels(resource_type=rtype).inc(len(deleted_list))
                 logger.info(f"Cluster GC completed: {result}")
             else:
                 logger.debug("Cluster GC completed: no orphaned resources found")
 
-            GC_RUNS.labels(status="success").inc()
+            CLUSTER_GC_RUNS.labels(status="success").inc()
 
         except Exception as e:
             logger.error(f"Cluster garbage collection failed: {e}")
-            GC_RUNS.labels(status="error").inc()
+            CLUSTER_GC_RUNS.labels(status="error").inc()
 
         await stopped.wait(gc_interval)

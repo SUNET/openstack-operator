@@ -64,6 +64,8 @@ def create_network_handler(
 ) -> None:
     """Handle OpenstackNetwork creation."""
     logger.info(f"Creating OpenstackNetwork: {name}")
+    start_time = time.monotonic()
+    RECONCILE_IN_PROGRESS.labels(resource="OpenstackNetwork").inc()
 
     patch.status["phase"] = "Provisioning"
     patch.status["conditions"] = []
@@ -95,6 +97,13 @@ def create_network_handler(
         patch.status["phase"] = "Ready"
         patch.status["lastSyncTime"] = now_iso()
 
+        duration = time.monotonic() - start_time
+        RECONCILE_TOTAL.labels(
+            resource="OpenstackNetwork", operation="create", status="success"
+        ).inc()
+        RECONCILE_DURATION.labels(
+            resource="OpenstackNetwork", operation="create"
+        ).observe(duration)
         logger.info(
             f"Successfully created OpenstackNetwork: {name} (id={result['networkId']})"
         )
@@ -103,7 +112,12 @@ def create_network_handler(
         logger.error(f"Failed to create OpenstackNetwork {name}: {e}")
         patch.status["phase"] = "Error"
         _set_patch_condition(patch, "NetworkReady", "False", "Error", str(e)[:200])
+        RECONCILE_TOTAL.labels(
+            resource="OpenstackNetwork", operation="create", status="error"
+        ).inc()
         raise kopf.TemporaryError(f"Creation failed: {e}", delay=60)
+    finally:
+        RECONCILE_IN_PROGRESS.labels(resource="OpenstackNetwork").dec()
 
 
 @kopf.on.update("sunet.se", "v1alpha1", "openstacknetworks")
@@ -121,6 +135,8 @@ def update_network_handler(
     we need to delete and recreate.
     """
     logger.info(f"Updating OpenstackNetwork: {name}")
+    start_time = time.monotonic()
+    RECONCILE_IN_PROGRESS.labels(resource="OpenstackNetwork").inc()
 
     client = get_openstack_client()
     registry = get_registry()
@@ -137,6 +153,7 @@ def update_network_handler(
 
         if not network_id:
             # No network ID, treat as create
+            RECONCILE_IN_PROGRESS.labels(resource="OpenstackNetwork").dec()
             create_network_handler(spec=spec, patch=patch, name=name)
             return
 
@@ -180,13 +197,25 @@ def update_network_handler(
         patch.status["phase"] = "Ready"
         patch.status["lastSyncTime"] = now_iso()
 
+        duration = time.monotonic() - start_time
+        RECONCILE_TOTAL.labels(
+            resource="OpenstackNetwork", operation="update", status="success"
+        ).inc()
+        RECONCILE_DURATION.labels(
+            resource="OpenstackNetwork", operation="update"
+        ).observe(duration)
         logger.info(f"Successfully updated OpenstackNetwork: {name}")
 
     except Exception as e:
         logger.error(f"Failed to update OpenstackNetwork {name}: {e}")
         patch.status["phase"] = "Error"
         _set_patch_condition(patch, "NetworkReady", "False", "Error", str(e)[:200])
+        RECONCILE_TOTAL.labels(
+            resource="OpenstackNetwork", operation="update", status="error"
+        ).inc()
         raise kopf.TemporaryError(f"Update failed: {e}", delay=60)
+    finally:
+        RECONCILE_IN_PROGRESS.labels(resource="OpenstackNetwork").dec()
 
 
 @kopf.on.delete("sunet.se", "v1alpha1", "openstacknetworks")
@@ -198,6 +227,8 @@ def delete_network_handler(
 ) -> None:
     """Handle OpenstackNetwork deletion."""
     logger.info(f"Deleting OpenstackNetwork: {name}")
+    start_time = time.monotonic()
+    RECONCILE_IN_PROGRESS.labels(resource="OpenstackNetwork").inc()
 
     client = get_openstack_client()
     registry = get_registry()
@@ -207,6 +238,7 @@ def delete_network_handler(
 
     if not network_id:
         logger.warning(f"No networkId in status for {name}, nothing to delete")
+        RECONCILE_IN_PROGRESS.labels(resource="OpenstackNetwork").dec()
         return
 
     try:
@@ -216,11 +248,23 @@ def delete_network_handler(
         delete_provider_network(client, network_id, subnet_ids)
         registry.unregister("provider_networks", network_name)
 
+        duration = time.monotonic() - start_time
+        RECONCILE_TOTAL.labels(
+            resource="OpenstackNetwork", operation="delete", status="success"
+        ).inc()
+        RECONCILE_DURATION.labels(
+            resource="OpenstackNetwork", operation="delete"
+        ).observe(duration)
         logger.info(f"Successfully deleted OpenstackNetwork: {name}")
 
     except Exception as e:
         logger.error(f"Failed to delete OpenstackNetwork {name}: {e}")
+        RECONCILE_TOTAL.labels(
+            resource="OpenstackNetwork", operation="delete", status="error"
+        ).inc()
         raise kopf.TemporaryError(f"Deletion failed: {e}", delay=60)
+    finally:
+        RECONCILE_IN_PROGRESS.labels(resource="OpenstackNetwork").dec()
 
 
 @kopf.timer("sunet.se", "v1alpha1", "openstacknetworks", interval=300)

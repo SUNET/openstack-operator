@@ -60,6 +60,8 @@ def create_image_handler(
 ) -> None:
     """Handle OpenstackImage creation."""
     logger.info(f"Creating OpenstackImage: {name}")
+    start_time = time.monotonic()
+    RECONCILE_IN_PROGRESS.labels(resource="OpenstackImage").inc()
 
     patch.status["phase"] = "Provisioning"
     patch.status["conditions"] = []
@@ -121,15 +123,31 @@ def create_image_handler(
                 # Keep phase as Provisioning until import completes
 
             patch.status["lastSyncTime"] = now_iso()
+
+            duration = time.monotonic() - start_time
+            RECONCILE_TOTAL.labels(
+                resource="OpenstackImage", operation="create", status="success"
+            ).inc()
+            RECONCILE_DURATION.labels(
+                resource="OpenstackImage", operation="create"
+            ).observe(duration)
             logger.info(f"Created OpenstackImage: {name} (id={image_id}, status={upload_status})")
 
     except kopf.TemporaryError:
+        RECONCILE_TOTAL.labels(
+            resource="OpenstackImage", operation="create", status="error"
+        ).inc()
         raise
     except Exception as e:
         logger.error(f"Failed to create OpenstackImage {name}: {e}")
         patch.status["phase"] = "Error"
         _set_patch_condition(patch, "ImageReady", "False", "Error", str(e)[:200])
+        RECONCILE_TOTAL.labels(
+            resource="OpenstackImage", operation="create", status="error"
+        ).inc()
         raise kopf.TemporaryError(f"Creation failed: {e}", delay=60)
+    finally:
+        RECONCILE_IN_PROGRESS.labels(resource="OpenstackImage").dec()
 
 
 @kopf.on.update("sunet.se", "v1alpha1", "openstackimages")
@@ -146,6 +164,8 @@ def update_image_handler(
     Changing the content (URL) requires delete and recreate.
     """
     logger.info(f"Updating OpenstackImage: {name}")
+    start_time = time.monotonic()
+    RECONCILE_IN_PROGRESS.labels(resource="OpenstackImage").inc()
 
     client = get_openstack_client()
     patch.status["phase"] = "Provisioning"
@@ -160,6 +180,7 @@ def update_image_handler(
 
         if not image_id:
             # No image ID, treat as create
+            RECONCILE_IN_PROGRESS.labels(resource="OpenstackImage").dec()
             create_image_handler(spec=spec, patch=patch, name=name)
             return
 
@@ -181,13 +202,25 @@ def update_image_handler(
         patch.status["phase"] = "Ready"
         patch.status["lastSyncTime"] = now_iso()
 
+        duration = time.monotonic() - start_time
+        RECONCILE_TOTAL.labels(
+            resource="OpenstackImage", operation="update", status="success"
+        ).inc()
+        RECONCILE_DURATION.labels(
+            resource="OpenstackImage", operation="update"
+        ).observe(duration)
         logger.info(f"Successfully updated OpenstackImage: {name}")
 
     except Exception as e:
         logger.error(f"Failed to update OpenstackImage {name}: {e}")
         patch.status["phase"] = "Error"
         _set_patch_condition(patch, "ImageReady", "False", "Error", str(e)[:200])
+        RECONCILE_TOTAL.labels(
+            resource="OpenstackImage", operation="update", status="error"
+        ).inc()
         raise kopf.TemporaryError(f"Update failed: {e}", delay=60)
+    finally:
+        RECONCILE_IN_PROGRESS.labels(resource="OpenstackImage").dec()
 
 
 @kopf.on.delete("sunet.se", "v1alpha1", "openstackimages")
@@ -199,6 +232,8 @@ def delete_image_handler(
 ) -> None:
     """Handle OpenstackImage deletion."""
     logger.info(f"Deleting OpenstackImage: {name}")
+    start_time = time.monotonic()
+    RECONCILE_IN_PROGRESS.labels(resource="OpenstackImage").inc()
 
     is_external = spec.get("external", False)
     image_name = spec["name"]
@@ -206,6 +241,7 @@ def delete_image_handler(
     if is_external:
         # External images are not deleted - we don't own them
         logger.info(f"Skipping deletion of external image {name} (not owned by operator)")
+        RECONCILE_IN_PROGRESS.labels(resource="OpenstackImage").dec()
         return
 
     client = get_openstack_client()
@@ -215,16 +251,30 @@ def delete_image_handler(
 
     if not image_id:
         logger.warning(f"No imageId in status for {name}, nothing to delete")
+        RECONCILE_IN_PROGRESS.labels(resource="OpenstackImage").dec()
         return
 
     try:
         delete_image(client, image_id)
         registry.unregister("images", image_name)
+
+        duration = time.monotonic() - start_time
+        RECONCILE_TOTAL.labels(
+            resource="OpenstackImage", operation="delete", status="success"
+        ).inc()
+        RECONCILE_DURATION.labels(
+            resource="OpenstackImage", operation="delete"
+        ).observe(duration)
         logger.info(f"Successfully deleted OpenstackImage: {name}")
 
     except Exception as e:
         logger.error(f"Failed to delete OpenstackImage {name}: {e}")
+        RECONCILE_TOTAL.labels(
+            resource="OpenstackImage", operation="delete", status="error"
+        ).inc()
         raise kopf.TemporaryError(f"Deletion failed: {e}", delay=60)
+    finally:
+        RECONCILE_IN_PROGRESS.labels(resource="OpenstackImage").dec()
 
 
 @kopf.timer("sunet.se", "v1alpha1", "openstackimages", interval=30)

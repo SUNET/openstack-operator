@@ -55,22 +55,41 @@ MANAGED_RESOURCES = Gauge(
     ["resource", "phase"],
 )
 
-# Garbage collection metrics
-GC_RUNS = Counter(
-    "openstack_operator_gc_runs_total",
-    "Total number of garbage collection runs",
+# Garbage collection metrics - cluster-scoped (domains, flavors, images, networks)
+CLUSTER_GC_RUNS = Counter(
+    "openstack_operator_cluster_gc_runs_total",
+    "Total number of cluster-scoped garbage collection runs",
     ["status"],
 )
 
-GC_DELETED_RESOURCES = Counter(
-    "openstack_operator_gc_deleted_resources_total",
-    "Total number of resources deleted by garbage collection",
+CLUSTER_GC_DELETED_RESOURCES = Counter(
+    "openstack_operator_cluster_gc_deleted_resources_total",
+    "Total number of cluster-scoped resources deleted by garbage collection",
     ["resource_type"],
 )
 
-GC_DURATION = Histogram(
-    "openstack_operator_gc_duration_seconds",
-    "Time spent in garbage collection",
+CLUSTER_GC_DURATION = Histogram(
+    "openstack_operator_cluster_gc_duration_seconds",
+    "Time spent in cluster-scoped garbage collection",
+    buckets=(1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0),
+)
+
+# Garbage collection metrics - namespace-scoped (projects)
+PROJECT_GC_RUNS = Counter(
+    "openstack_operator_project_gc_runs_total",
+    "Total number of project garbage collection runs",
+    ["status"],
+)
+
+PROJECT_GC_DELETED_RESOURCES = Counter(
+    "openstack_operator_project_gc_deleted_resources_total",
+    "Total number of project resources deleted by garbage collection",
+    ["resource_type"],
+)
+
+PROJECT_GC_DURATION = Histogram(
+    "openstack_operator_project_gc_duration_seconds",
+    "Time spent in project garbage collection",
     buckets=(1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0),
 )
 
