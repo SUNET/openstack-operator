@@ -266,4 +266,4 @@ def reconcile_flavor(
         patch.status["lastSyncTime"] = now_iso()
 
     except Exception as e:
-        logger.error(f"Reconciliation failed for {name}: {e}")
+        logger.exception(f"Reconciliation failed for {name}")

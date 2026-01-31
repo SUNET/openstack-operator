@@ -660,7 +660,7 @@ def reconcile_project(
         patch.status["lastSyncTime"] = now_iso()
 
     except Exception as e:
-        logger.error(f"Reconciliation failed for {namespace}/{name}: {e}")
+        logger.exception(f"Reconciliation failed for {namespace}/{name}")
 
 
 @kopf.daemon("sunet.se", "v1alpha1", "openstackprojects", cancellation_timeout=10)
