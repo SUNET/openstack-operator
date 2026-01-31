@@ -465,7 +465,7 @@ class OpenStackClient:
     # Network operations
     # -------------------------------------------------------------------------
 
-    @retry_on_error()
+    @retry_on_error(exceptions=(HttpException, KeyError))
     def get_network(self, name: str, project_id: str) -> Network | None:
         """Get a network by name within a project."""
         networks = list(self.conn.network.networks(name=name, project_id=project_id))
@@ -491,11 +491,16 @@ class OpenStackClient:
         except ResourceNotFound:
             logger.debug("Network %s already deleted", network_id)
 
-    @retry_on_error()
+    @retry_on_error(exceptions=(HttpException, KeyError))
     def get_subnet(self, name: str, network_id: str) -> Subnet | None:
         """Get a subnet by name within a network."""
         subnets = list(self.conn.network.subnets(name=name, network_id=network_id))
         return subnets[0] if subnets else None
+
+    @retry_on_error(exceptions=(HttpException, KeyError))
+    def list_subnets(self, network_id: str) -> list[Subnet]:
+        """List all subnets on a network."""
+        return list(self.conn.network.subnets(network_id=network_id))
 
     @retry_on_error()
     def create_subnet(
@@ -530,7 +535,7 @@ class OpenStackClient:
         except ResourceNotFound:
             logger.debug("Subnet %s already deleted", subnet_id)
 
-    @retry_on_error()
+    @retry_on_error(exceptions=(HttpException, KeyError))
     def get_router(self, name: str, project_id: str) -> Router | None:
         """Get a router by name within a project."""
         routers = list(self.conn.network.routers(name=name, project_id=project_id))
@@ -597,7 +602,7 @@ class OpenStackClient:
         except ResourceNotFound:
             logger.debug("Router %s already deleted", router_id)
 
-    @retry_on_error()
+    @retry_on_error(exceptions=(HttpException, KeyError))
     def get_external_network(self, name: str) -> Network | None:
         """Get an external network by name."""
         networks = list(
@@ -609,7 +614,7 @@ class OpenStackClient:
     # Security group operations
     # -------------------------------------------------------------------------
 
-    @retry_on_error()
+    @retry_on_error(exceptions=(HttpException, KeyError))
     def get_security_group(self, name: str, project_id: str) -> SecurityGroup | None:
         """Get a security group by name within a project."""
         sgs = list(
@@ -952,9 +957,14 @@ class OpenStackClient:
     # Provider network operations (admin)
     # -------------------------------------------------------------------------
 
-    @retry_on_error()
+    @retry_on_error(exceptions=(HttpException, KeyError))
     def get_network_by_name(self, name: str) -> Network | None:
-        """Get a network by name (any project, for provider networks)."""
+        """Get a network by name (any project, for provider networks).
+
+        Note: KeyError is included in retry exceptions because the OpenStack SDK
+        can raise KeyError when parsing malformed API responses (e.g., when a
+        proxy returns an error page instead of JSON).
+        """
         networks = list(self.conn.network.networks(name=name))
         return networks[0] if networks else None
 

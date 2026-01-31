@@ -119,7 +119,7 @@ def _get_subnet_statuses(
     Returns:
         List of dicts with name and subnetId
     """
-    subnets = list(client.conn.network.subnets(network_id=network_id))
+    subnets = client.list_subnets(network_id)
     return [{"name": s.name, "subnetId": s.id} for s in subnets]
 
 
