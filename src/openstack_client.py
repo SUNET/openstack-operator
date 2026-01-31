@@ -299,6 +299,14 @@ class OpenStackClient:
         except ResourceNotFound:
             logger.debug("Group %s already deleted", group_id)
 
+    @retry_on_error()
+    def get_group_by_id(self, group_id: str) -> Group | None:
+        """Get a group by ID."""
+        try:
+            return self.conn.identity.get_group(group_id)
+        except ResourceNotFound:
+            return None
+
     # -------------------------------------------------------------------------
     # User operations
     # -------------------------------------------------------------------------

@@ -2,7 +2,20 @@
 
 import datetime
 import re
+import uuid
 from typing import Any
+
+
+def is_valid_uuid(value: str) -> bool:
+    """Check if a string is a valid UUID.
+
+    Used to detect if a stored group_id is actually a name instead of an ID.
+    """
+    try:
+        uuid.UUID(value)
+        return True
+    except (ValueError, TypeError):
+        return False
 
 
 def sanitize_name(name: str) -> str:

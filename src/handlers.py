@@ -28,7 +28,7 @@ from resources.garbage_collection import (
 from resources.role_binding import apply_role_bindings, get_users_from_role_bindings
 from resources.security_group import delete_security_groups, ensure_security_groups
 from state import state, get_openstack_client, get_registry
-from utils import now_iso
+from utils import is_valid_uuid, make_group_name, now_iso
 from metrics import (
     RECONCILE_TOTAL,
     RECONCILE_DURATION,
@@ -80,6 +80,73 @@ def _set_patch_condition(
             "lastTransitionTime": now_iso(),
         }
     )
+
+
+def _resolve_group_id(
+    client: Any,
+    group_id: str | None,
+    project_name: str,
+    domain: str,
+    patch: kopf.Patch,
+) -> str | None:
+    """Resolve a group identifier to an actual group ID.
+
+    Handles the case where status.groupId contains a group name instead of
+    a UUID (legacy data or manual edits). If the stored value is not a valid
+    UUID, it will look up the group by deriving the name from the project name.
+
+    If the group ID is corrected, also updates patch.status["groupId"] so the
+    fix is persisted.
+
+    Args:
+        client: OpenStack client
+        group_id: The stored group_id (may be a name or UUID)
+        project_name: Project name (used to derive expected group name)
+        domain: Domain for group lookup
+        patch: Kopf patch object to update status if group_id is corrected
+
+    Returns:
+        The resolved group ID (UUID), or None if group not found
+    """
+    if not group_id:
+        return None
+
+    # If it's a valid UUID, verify the group exists and return it
+    if is_valid_uuid(group_id):
+        group = client.get_group_by_id(group_id)
+        if group:
+            return group_id
+        # Group ID is a UUID but group doesn't exist - try to find by name
+        logger.warning(
+            "Group with ID %s not found, attempting to find by name", group_id
+        )
+
+    # The stored group_id is not a UUID or group not found by ID
+    # Try to find the group by deriving the name from project name
+    expected_group_name = make_group_name(project_name)
+    logger.info(
+        "Resolving group by name: %s (stored value was: %s)",
+        expected_group_name,
+        group_id,
+    )
+
+    group = client.get_group(expected_group_name, domain)
+    if group:
+        logger.info(
+            "Resolved group %s to ID %s (correcting stored value)",
+            expected_group_name,
+            group.id,
+        )
+        # Update the patch so the correct ID is persisted
+        patch.status["groupId"] = group.id
+        return group.id
+
+    logger.warning(
+        "Could not resolve group for project %s (expected name: %s)",
+        project_name,
+        expected_group_name,
+    )
+    return None
 
 
 def get_federation_config(
@@ -313,6 +380,9 @@ def update_project(
 
         project_id = status.get("projectId")
         group_id = status.get("groupId")
+
+        # Resolve group_id if it's not a valid UUID (legacy data fix)
+        group_id = _resolve_group_id(client, group_id, project_name, domain, patch)
 
         # If we don't have project_id, treat as create
         if not project_id:

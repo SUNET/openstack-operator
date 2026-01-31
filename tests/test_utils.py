@@ -1,7 +1,32 @@
 """Tests for utility functions."""
 
 import datetime
-from utils import sanitize_name, make_group_name, now_iso, set_condition
+from utils import is_valid_uuid, sanitize_name, make_group_name, now_iso, set_condition
+
+
+class TestIsValidUuid:
+    """Tests for is_valid_uuid function."""
+
+    def test_valid_uuid_v4(self):
+        assert is_valid_uuid("7581eb5e-69a1-4d73-9608-015b7fbfe1fb") is True
+
+    def test_valid_uuid_without_hyphens(self):
+        assert is_valid_uuid("7581eb5e69a14d739608015b7fbfe1fb") is True
+
+    def test_valid_uuid_uppercase(self):
+        assert is_valid_uuid("7581EB5E-69A1-4D73-9608-015B7FBFE1FB") is True
+
+    def test_invalid_group_name(self):
+        assert is_valid_uuid("platform-test-sunet-se-users") is False
+
+    def test_invalid_empty_string(self):
+        assert is_valid_uuid("") is False
+
+    def test_invalid_none(self):
+        assert is_valid_uuid(None) is False
+
+    def test_invalid_short_string(self):
+        assert is_valid_uuid("abc123") is False
 
 
 class TestSanitizeName:
