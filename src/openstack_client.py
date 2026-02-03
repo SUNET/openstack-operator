@@ -9,7 +9,7 @@ from typing import ParamSpec, TypeVar
 
 import openstack
 from openstack.connection import Connection
-from openstack.exceptions import ConflictException, HttpException, ResourceNotFound
+from openstack.exceptions import ConflictException, DuplicateResource, HttpException, ResourceNotFound
 from openstack.identity.v3.domain import Domain
 from openstack.identity.v3.group import Group
 from openstack.identity.v3.project import Project
@@ -862,8 +862,25 @@ class OpenStackClient:
 
     @retry_on_error()
     def get_image(self, name: str) -> object | None:
-        """Get an image by name."""
-        return self.conn.image.find_image(name)
+        """Get an image by name.
+
+        If multiple images exist with the same name, returns the first one
+        and logs a warning.
+        """
+        try:
+            return self.conn.image.find_image(name)
+        except DuplicateResource:
+            # Multiple images with same name - list them and return the first
+            images = list(self.conn.image.images(name=name))
+            if images:
+                logger.warning(
+                    "Multiple images found with name '%s' (count=%d), using first: %s",
+                    name,
+                    len(images),
+                    images[0].id,
+                )
+                return images[0]
+            return None
 
     @retry_on_error()
     def create_image(
