@@ -60,6 +60,7 @@ def create_network_handler(
     spec: dict[str, Any],
     patch: kopf.Patch,
     name: str,
+    body: kopf.Body,
     **_: Any,
 ) -> None:
     """Handle OpenstackNetwork creation."""
@@ -115,6 +116,7 @@ def create_network_handler(
         RECONCILE_TOTAL.labels(
             resource="OpenstackNetwork", operation="create", status="error"
         ).inc()
+        kopf.warn(body, reason="CreateFailed", message=str(e)[:200])
         raise kopf.TemporaryError(f"Creation failed: {e}", delay=60)
     finally:
         RECONCILE_IN_PROGRESS.labels(resource="OpenstackNetwork").dec()
@@ -127,6 +129,7 @@ def update_network_handler(
     patch: kopf.Patch,
     name: str,
     diff: kopf.Diff,
+    body: kopf.Body,
     **_: Any,
 ) -> None:
     """Handle OpenstackNetwork updates.
@@ -213,6 +216,7 @@ def update_network_handler(
         RECONCILE_TOTAL.labels(
             resource="OpenstackNetwork", operation="update", status="error"
         ).inc()
+        kopf.warn(body, reason="UpdateFailed", message=str(e)[:200])
         raise kopf.TemporaryError(f"Update failed: {e}", delay=60)
     finally:
         RECONCILE_IN_PROGRESS.labels(resource="OpenstackNetwork").dec()
@@ -223,6 +227,7 @@ def delete_network_handler(
     spec: dict[str, Any],
     status: dict[str, Any],
     name: str,
+    body: kopf.Body,
     **_: Any,
 ) -> None:
     """Handle OpenstackNetwork deletion."""
@@ -262,6 +267,7 @@ def delete_network_handler(
         RECONCILE_TOTAL.labels(
             resource="OpenstackNetwork", operation="delete", status="error"
         ).inc()
+        kopf.warn(body, reason="DeleteFailed", message=str(e)[:200])
         raise kopf.TemporaryError(f"Deletion failed: {e}", delay=60)
     finally:
         RECONCILE_IN_PROGRESS.labels(resource="OpenstackNetwork").dec()

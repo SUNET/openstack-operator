@@ -56,6 +56,7 @@ def create_flavor_handler(
     spec: dict[str, Any],
     patch: kopf.Patch,
     name: str,
+    body: kopf.Body,
     **_: Any,
 ) -> None:
     """Handle OpenstackFlavor creation."""
@@ -100,6 +101,7 @@ def create_flavor_handler(
         RECONCILE_TOTAL.labels(
             resource="OpenstackFlavor", operation="create", status="error"
         ).inc()
+        kopf.warn(body, reason="CreateFailed", message=str(e)[:200])
         raise kopf.TemporaryError(f"Creation failed: {e}", delay=60)
     finally:
         RECONCILE_IN_PROGRESS.labels(resource="OpenstackFlavor").dec()
@@ -112,6 +114,7 @@ def update_flavor_handler(
     patch: kopf.Patch,
     name: str,
     diff: kopf.Diff,
+    body: kopf.Body,
     **_: Any,
 ) -> None:
     """Handle OpenstackFlavor updates.
@@ -181,6 +184,7 @@ def update_flavor_handler(
         RECONCILE_TOTAL.labels(
             resource="OpenstackFlavor", operation="update", status="error"
         ).inc()
+        kopf.warn(body, reason="UpdateFailed", message=str(e)[:200])
         raise kopf.TemporaryError(f"Update failed: {e}", delay=60)
     finally:
         RECONCILE_IN_PROGRESS.labels(resource="OpenstackFlavor").dec()
@@ -191,6 +195,7 @@ def delete_flavor_handler(
     spec: dict[str, Any],
     status: dict[str, Any],
     name: str,
+    body: kopf.Body,
     **_: Any,
 ) -> None:
     """Handle OpenstackFlavor deletion."""
@@ -227,6 +232,7 @@ def delete_flavor_handler(
         RECONCILE_TOTAL.labels(
             resource="OpenstackFlavor", operation="delete", status="error"
         ).inc()
+        kopf.warn(body, reason="DeleteFailed", message=str(e)[:200])
         raise kopf.TemporaryError(f"Deletion failed: {e}", delay=60)
     finally:
         RECONCILE_IN_PROGRESS.labels(resource="OpenstackFlavor").dec()

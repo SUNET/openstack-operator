@@ -57,6 +57,7 @@ def create_domain_handler(
     patch: kopf.Patch,
     name: str,
     meta: dict[str, Any],
+    body: kopf.Body,
     **_: Any,
 ) -> None:
     """Handle OpenstackDomain creation."""
@@ -112,6 +113,7 @@ def create_domain_handler(
         RECONCILE_TOTAL.labels(
             resource="OpenstackDomain", operation="create", status="error"
         ).inc()
+        kopf.warn(body, reason="CreateFailed", message=str(e)[:200])
         raise kopf.TemporaryError(f"Creation failed: {e}", delay=60)
     finally:
         RECONCILE_IN_PROGRESS.labels(resource="OpenstackDomain").dec()
@@ -124,6 +126,7 @@ def update_domain_handler(
     patch: kopf.Patch,
     name: str,
     meta: dict[str, Any],
+    body: kopf.Body,
     **_: Any,
 ) -> None:
     """Handle OpenstackDomain updates."""
@@ -183,6 +186,7 @@ def update_domain_handler(
         RECONCILE_TOTAL.labels(
             resource="OpenstackDomain", operation="update", status="error"
         ).inc()
+        kopf.warn(body, reason="UpdateFailed", message=str(e)[:200])
         raise kopf.TemporaryError(f"Update failed: {e}", delay=60)
     finally:
         RECONCILE_IN_PROGRESS.labels(resource="OpenstackDomain").dec()
@@ -193,6 +197,7 @@ def delete_domain_handler(
     spec: dict[str, Any],
     status: dict[str, Any],
     name: str,
+    body: kopf.Body,
     **_: Any,
 ) -> None:
     """Handle OpenstackDomain deletion."""
@@ -229,6 +234,7 @@ def delete_domain_handler(
         RECONCILE_TOTAL.labels(
             resource="OpenstackDomain", operation="delete", status="error"
         ).inc()
+        kopf.warn(body, reason="DeleteFailed", message=str(e)[:200])
         raise kopf.TemporaryError(f"Deletion failed: {e}", delay=60)
     finally:
         RECONCILE_IN_PROGRESS.labels(resource="OpenstackDomain").dec()

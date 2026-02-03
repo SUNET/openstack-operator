@@ -56,6 +56,7 @@ def create_image_handler(
     spec: dict[str, Any],
     patch: kopf.Patch,
     name: str,
+    body: kopf.Body,
     **_: Any,
 ) -> None:
     """Handle OpenstackImage creation."""
@@ -145,6 +146,7 @@ def create_image_handler(
         RECONCILE_TOTAL.labels(
             resource="OpenstackImage", operation="create", status="error"
         ).inc()
+        kopf.warn(body, reason="CreateFailed", message=str(e)[:200])
         raise kopf.TemporaryError(f"Creation failed: {e}", delay=60)
     finally:
         RECONCILE_IN_PROGRESS.labels(resource="OpenstackImage").dec()
@@ -156,6 +158,7 @@ def update_image_handler(
     status: dict[str, Any],
     patch: kopf.Patch,
     name: str,
+    body: kopf.Body,
     **_: Any,
 ) -> None:
     """Handle OpenstackImage updates.
@@ -218,6 +221,7 @@ def update_image_handler(
         RECONCILE_TOTAL.labels(
             resource="OpenstackImage", operation="update", status="error"
         ).inc()
+        kopf.warn(body, reason="UpdateFailed", message=str(e)[:200])
         raise kopf.TemporaryError(f"Update failed: {e}", delay=60)
     finally:
         RECONCILE_IN_PROGRESS.labels(resource="OpenstackImage").dec()
@@ -228,6 +232,7 @@ def delete_image_handler(
     spec: dict[str, Any],
     status: dict[str, Any],
     name: str,
+    body: kopf.Body,
     **_: Any,
 ) -> None:
     """Handle OpenstackImage deletion."""
@@ -272,6 +277,7 @@ def delete_image_handler(
         RECONCILE_TOTAL.labels(
             resource="OpenstackImage", operation="delete", status="error"
         ).inc()
+        kopf.warn(body, reason="DeleteFailed", message=str(e)[:200])
         raise kopf.TemporaryError(f"Deletion failed: {e}", delay=60)
     finally:
         RECONCILE_IN_PROGRESS.labels(resource="OpenstackImage").dec()

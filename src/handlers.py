@@ -229,6 +229,7 @@ def create_project(
     namespace: str,
     name: str,
     meta: dict[str, Any],
+    body: kopf.Body,
     **_: Any,
 ) -> None:
     """Handle OpenstackProject creation."""
@@ -341,6 +342,7 @@ def create_project(
         RECONCILE_TOTAL.labels(
             resource="OpenstackProject", operation="create", status="error"
         ).inc()
+        kopf.warn(body, reason="CreateFailed", message=str(e)[:200])
         raise kopf.TemporaryError(f"Creation failed: {e}", delay=60)
     finally:
         RECONCILE_IN_PROGRESS.labels(resource="OpenstackProject").dec()
@@ -355,6 +357,7 @@ def update_project(
     name: str,
     meta: dict[str, Any],
     diff: kopf.Diff,
+    body: kopf.Body,
     **_: Any,
 ) -> None:
     """Handle OpenstackProject updates."""
@@ -502,6 +505,7 @@ def update_project(
         RECONCILE_TOTAL.labels(
             resource="OpenstackProject", operation="update", status="error"
         ).inc()
+        kopf.warn(body, reason="UpdateFailed", message=str(e)[:200])
         raise kopf.TemporaryError(f"Update failed: {e}", delay=60)
     finally:
         RECONCILE_IN_PROGRESS.labels(resource="OpenstackProject").dec()
@@ -513,6 +517,7 @@ def delete_project_handler(
     status: dict[str, Any],
     namespace: str,
     name: str,
+    body: kopf.Body,
     **_: Any,
 ) -> None:
     """Handle OpenstackProject deletion."""
@@ -579,6 +584,7 @@ def delete_project_handler(
         RECONCILE_TOTAL.labels(
             resource="OpenstackProject", operation="delete", status="error"
         ).inc()
+        kopf.warn(body, reason="DeleteFailed", message=str(e)[:200])
         raise kopf.TemporaryError(f"Deletion failed: {e}", delay=60)
     finally:
         RECONCILE_IN_PROGRESS.labels(resource="OpenstackProject").dec()
